@@ -256,6 +256,7 @@ func (m *ChatModel) relayout() {
 
 func (m ChatModel) View() tea.View {
 	hud := components.RenderHUD(m.hud, m.width)
+
 	divider := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(tui.ColBorder)).
 		Render(strings.Repeat("─", m.width))
@@ -273,6 +274,7 @@ func (m ChatModel) View() tea.View {
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	v := tea.NewView(content)
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 
