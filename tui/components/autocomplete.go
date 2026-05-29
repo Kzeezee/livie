@@ -10,6 +10,14 @@ import (
 
 const autocompleteMaxVisible = 5
 
+// Per-frame style allocations hoisted to package level.
+var (
+	acNameStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentPurple)).Bold(true)
+	acDescStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextSecondary))
+	acMarkerStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentPurple)).Bold(true)
+	acCounterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextMuted))
+)
+
 // AutocompleteModel handles /command autocomplete suggestions.
 // It maintains a full match list and a sliding 5-row visible window.
 type AutocompleteModel struct {
@@ -168,10 +176,10 @@ func (m *AutocompleteModel) View() string {
 		}
 	}
 
-	nameStyle    := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentPurple)).Bold(true)
-	descStyle    := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextSecondary))
-	markerStyle  := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentPurple)).Bold(true)
-	counterStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextMuted))
+	nameStyle    := acNameStyle
+	descStyle    := acDescStyle
+	markerStyle  := acMarkerStyle
+	counterStyle := acCounterStyle
 
 	// Available width for the description column:
 	//   2 (left pad) + 1 (marker) + 1 (space) + 1 ("/") + maxNameLen + 2 (gap)

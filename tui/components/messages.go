@@ -38,6 +38,9 @@ func NewMessage(t MsgType, content string) Message {
 	return Message{Type: t, Content: content, Timestamp: time.Now()}
 }
 
+// nudgeStyle is created once and reused for the "↓ new messages" overlay.
+var nudgeStyle = lipgloss.NewStyle().Align(lipgloss.Right)
+
 // MessagesModel manages the scrollable message history.
 type MessagesModel struct {
 	viewport     viewport.Model
@@ -79,18 +82,23 @@ func NewMessagesModel(width, height int) MessagesModel {
 }
 
 // SetSize updates the viewport dimensions.
+// When only height changes the rendered content is unchanged, so we skip the
+// expensive glamour-renderer rebuild and full message re-render.
 func (m *MessagesModel) SetSize(width, height int) {
+	widthChanged := width != m.width
 	m.width = width
 	m.height = height
 	m.viewport.SetWidth(width)
 	m.viewport.SetHeight(height)
-	if m.renderer != nil {
-		m.renderer, _ = glamour.NewTermRenderer(
-			glamour.WithStandardStyle("dark"),
-			glamour.WithWordWrap(width-4),
-		)
+	if widthChanged {
+		if m.renderer != nil {
+			m.renderer, _ = glamour.NewTermRenderer(
+				glamour.WithStandardStyle("dark"),
+				glamour.WithWordWrap(width-4),
+			)
+		}
+		m.refresh()
 	}
-	m.refresh()
 }
 
 // AddRaw appends a pre-rendered string block directly to the viewport content
@@ -145,6 +153,18 @@ func (m *MessagesModel) GotoBottom() {
 	m.newWhileAway = false
 }
 
+// LinesAbove returns the number of content lines scrolled above the current
+// viewport top — used to render the "↑ N more" indicator on the divider.
+func (m MessagesModel) LinesAbove() int {
+	return m.viewport.YOffset()
+}
+
+// Width returns the current viewport width.
+func (m MessagesModel) Width() int { return m.width }
+
+// Height returns the current viewport height.
+func (m MessagesModel) Height() int { return m.height }
+
 // GotoTop scrolls to the top.
 func (m *MessagesModel) GotoTop() {
 	m.viewport.GotoTop()
@@ -173,10 +193,7 @@ func (m MessagesModel) View() string {
 	// Show "↓ new messages" nudge when scrolled up and new content arrived
 	if m.newWhileAway && !m.atBottom {
 		nudge := tui.StyleAccentAmber.Render("↓ new messages")
-		nudgeLine := lipgloss.NewStyle().
-			Width(m.width).
-			Align(lipgloss.Right).
-			Render(nudge + "  ")
+		nudgeLine := nudgeStyle.Width(m.width).Render(nudge + "  ")
 		// Overlay at bottom of viewport area — just append as a suffix line
 		view = view + "\n" + nudgeLine
 	}

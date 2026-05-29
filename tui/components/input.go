@@ -17,10 +17,15 @@ const (
 
 // InputModel wraps a textarea with mode-aware styling.
 type InputModel struct {
-	textarea textarea.Model
-	mode     InputMode
-	disabled bool
-	width    int
+	textarea  textarea.Model
+	mode      InputMode
+	disabled  bool
+	width     int
+
+	// cached values — recomputed only when content changes, not on every frame
+	cachedValue string
+	cachedIsCmd bool
+	valueDirty  bool // true until cachedValue is rebuilt
 }
 
 // NewInputModel creates a new InputModel.
@@ -28,7 +33,10 @@ func NewInputModel(width int) InputModel {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message... (/help for commands)"
 	ta.ShowLineNumbers = false
-	ta.MaxHeight = InputMaxLines
+	// Do NOT set MaxHeight — that would shrink the internal wrap-memoization
+	// cache to 6 entries on the first Update() call, causing SHA-256 cache
+	// misses and rewraps on every frame for all lines beyond index 6.
+	// Height is managed entirely by autoGrow().
 	ta.SetWidth(width - 2) // account for prefix glyph + space
 	ta.SetHeight(InputMinLines)
 	ta.Focus()
@@ -72,6 +80,7 @@ func (m InputModel) TextareaHeight() int { return m.textarea.Height() }
 // SetValue sets the textarea content directly.
 func (m *InputModel) SetValue(s string) {
 	m.textarea.SetValue(s)
+	m.valueDirty = true
 	m.autoGrow()
 }
 
@@ -90,6 +99,14 @@ func (m *InputModel) SetDisabled(disabled bool) {
 		m.textarea.Focus()
 		m.textarea.Placeholder = "Type a message... (/help for commands)"
 	}
+}
+
+// rebuildCache recomputes the cached Value and IsCommand results.
+// Called lazily on first use after any content mutation.
+func (m *InputModel) rebuildCache() {
+	m.cachedValue = m.textarea.Value()
+	m.cachedIsCmd = strings.HasPrefix(strings.TrimSpace(m.cachedValue), "/")
+	m.valueDirty = false
 }
 
 // SetWidth updates the input width.
@@ -112,24 +129,40 @@ func (m InputModel) Height() int {
 }
 
 // Value returns the current input text.
-func (m InputModel) Value() string {
-	return m.textarea.Value()
+func (m *InputModel) Value() string {
+	if m.valueDirty {
+		m.rebuildCache()
+	}
+	return m.cachedValue
+}
+
+// LinesAbove returns the number of input lines scrolled above the visible
+// textarea window — used to render the "↑ N more" indicator on the divider.
+func (m InputModel) LinesAbove() int {
+	return m.textarea.ScrollYOffset()
 }
 
 // Reset clears the input field.
 func (m *InputModel) Reset() {
 	m.textarea.Reset()
+	m.valueDirty = true
 	m.autoGrow()
 }
 
-// InsertNewline appends a newline at the end of the current value.
+// InsertNewline inserts a newline at the current cursor position.
 func (m *InputModel) InsertNewline() {
-	m.textarea.SetValue(m.textarea.Value() + "\n")
+	m.textarea.InsertString("\n")
+	m.valueDirty = true
 	m.autoGrow()
 }
 
 // autoGrow adjusts the textarea's rendered height to match its current line
 // count, clamped between InputMinLines and InputMaxLines.
+//
+// SetHeight is called unconditionally (even when height is unchanged) because
+// it internally calls repositionView(), which updates the viewport's YOffset.
+// Without this, ScrollYOffset() — used by the "↑ N more" divider indicator —
+// only refreshes when a blink tick fires textarea.Update() (~300 ms latency).
 func (m *InputModel) autoGrow() {
 	desired := m.textarea.LineCount()
 	if desired < InputMinLines {
@@ -138,14 +171,15 @@ func (m *InputModel) autoGrow() {
 	if desired > InputMaxLines {
 		desired = InputMaxLines
 	}
-	if m.textarea.Height() != desired {
-		m.textarea.SetHeight(desired)
-	}
+	m.textarea.SetHeight(desired)
 }
 
 // IsCommand returns true when the input starts with /.
-func (m InputModel) IsCommand() bool {
-	return strings.HasPrefix(strings.TrimSpace(m.textarea.Value()), "/")
+func (m *InputModel) IsCommand() bool {
+	if m.valueDirty {
+		m.rebuildCache()
+	}
+	return m.cachedIsCmd
 }
 
 // Focus gives focus to the input.
@@ -165,13 +199,14 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
+	m.valueDirty = true
 	m.autoGrow()
 	return m, cmd
 }
 
 // View renders the borderless input area.
 // The glyph on the left indicates mode; the textarea fills the rest of the line.
-func (m InputModel) View() string {
+func (m *InputModel) View() string {
 	var glyph string
 
 	switch {

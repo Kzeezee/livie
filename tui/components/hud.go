@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"charm.land/lipgloss/v2"
 	tui "github.com/kez/livie/tui"
@@ -141,19 +142,29 @@ func renderTokens(used, max int) string {
 	}
 }
 
+var (
+	cachedDir     string
+	cachedDirOnce sync.Once
+)
+
 func currentDir() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return "~"
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return dir
-	}
-	if strings.HasPrefix(dir, home) {
-		dir = "~" + dir[len(home):]
-	}
-	return dir
+	cachedDirOnce.Do(func() {
+		dir, err := os.Getwd()
+		if err != nil {
+			cachedDir = "~"
+			return
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			cachedDir = dir
+			return
+		}
+		if strings.HasPrefix(dir, home) {
+			dir = "~" + dir[len(home):]
+		}
+		cachedDir = dir
+	})
+	return cachedDir
 }
 
 // truncateDir shortens a path like ~/a/very/long/path to ~/a/v/l/path

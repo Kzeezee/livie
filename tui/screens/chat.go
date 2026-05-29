@@ -1,6 +1,7 @@
 package screens
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -14,6 +15,14 @@ import (
 
 // quitConfirmMsg fires when the second ctrl+c window expires.
 type quitConfirmMsg struct{}
+
+// Styles created once and reused every frame.
+var (
+	dividerStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColBorder))
+	scrollIndicatorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(tui.ColAccentAmber)).
+				Bold(true)
+)
 
 // ChatModel is the primary screen — welcome block + chat in one viewport.
 type ChatModel struct {
@@ -241,9 +250,13 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 
 // syncInputHeight resizes the messages viewport to account for current input
 // and autocomplete heights. Also keeps autocomplete state in sync with input.
+// SetSize is skipped when dimensions are unchanged to avoid expensive re-renders.
 func (m *ChatModel) syncInputHeight() {
 	m.autocomplete.SetInput(m.input.Value(), m.registry)
-	m.messages.SetSize(m.width, viewportH(m.height, m.input.Height(), m.autocomplete.Height()))
+	newH := viewportH(m.height, m.input.Height(), m.autocomplete.Height())
+	if m.width != m.messages.Width() || newH != m.messages.Height() {
+		m.messages.SetSize(m.width, newH)
+	}
 }
 
 func (m *ChatModel) relayout() {
@@ -257,25 +270,49 @@ func (m *ChatModel) relayout() {
 func (m ChatModel) View() tea.View {
 	hud := components.RenderHUD(m.hud, m.width)
 
-	divider := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(tui.ColBorder)).
-		Render(strings.Repeat("─", m.width))
+	bottomDivider := dividerStyle.Render(strings.Repeat("─", m.width))
+	topDivider := renderTopDivider(m.width, m.input.LinesAbove())
 
 	parts := []string{
 		m.messages.View(),
-		divider,
+		topDivider,
 		m.input.View(),
 	}
 	if m.autocomplete.IsVisible() {
 		parts = append(parts, m.autocomplete.View())
 	}
-	parts = append(parts, divider, hud)
+	parts = append(parts, bottomDivider, hud)
 
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	return v
+}
+
+// renderTopDivider renders the divider above the input area.
+// When there are lines scrolled above the viewport it shows "↑ N more".
+func renderTopDivider(width, linesAbove int) string {
+	if linesAbove <= 0 {
+		return dividerStyle.Render(strings.Repeat("─", width))
+	}
+
+	indicator := fmt.Sprintf(" ↑ %d more ", linesAbove)
+	indicatorStyled := scrollIndicatorStyle.Render(indicator)
+
+	// Left stub: short fixed dash run before the indicator
+	const leftDashes = 2
+	left := dividerStyle.Render(strings.Repeat("─", leftDashes))
+
+	// Right fill: remaining width after left stub + indicator
+	indicatorWidth := lipgloss.Width(indicator)
+	rightDashes := width - leftDashes - indicatorWidth
+	if rightDashes < 0 {
+		rightDashes = 0
+	}
+	right := dividerStyle.Render(strings.Repeat("─", rightDashes))
+
+	return left + indicatorStyled + right
 }
 
 // Mode returns the current input mode of the chat screen.
