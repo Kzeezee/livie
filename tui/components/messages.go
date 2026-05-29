@@ -266,22 +266,29 @@ func wrapText(s string, width int) string {
 	if width <= 0 {
 		return s
 	}
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return s
-	}
-	var lines []string
-	line := words[0]
-	for _, w := range words[1:] {
-		if len(line)+1+len(w) <= width {
-			line += " " + w
-		} else {
-			lines = append(lines, line)
-			line = w
+	// Split on explicit newlines first so multi-line input is preserved.
+	paragraphs := strings.Split(s, "\n")
+	var result []string
+	for _, para := range paragraphs {
+		words := strings.Fields(para)
+		if len(words) == 0 {
+			result = append(result, "")
+			continue
 		}
+		var lines []string
+		line := words[0]
+		for _, w := range words[1:] {
+			if len(line)+1+len(w) <= width {
+				line += " " + w
+			} else {
+				lines = append(lines, line)
+				line = w
+			}
+		}
+		lines = append(lines, line)
+		result = append(result, strings.Join(lines, "\n  "))
 	}
-	lines = append(lines, line)
-	return strings.Join(lines, "\n  ")
+	return strings.Join(result, "\n  ")
 }
 
 
