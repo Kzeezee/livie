@@ -1,0 +1,54 @@
+# ── Binaries ────────────────────────────────────────────────────────────────
+livie
+livie.exe
+/dist/
+
+# ── Go ───────────────────────────────────────────────────────────────────────
+# Compiled output
+*.o
+*.a
+*.so
+
+# Test cache / coverage
+*.test
+*.out
+coverage.html
+coverage.txt
+
+# ── Model files ──────────────────────────────────────────────────────────────
+# GGUF model weights — large binaries, never committed
+*.gguf
+*.ggml
+*.bin
+*.safetensors
+model/
+models/
+
+# ── Runtime data ─────────────────────────────────────────────────────────────
+# Livie's local data directories (created at runtime)
+vault/
+index/
+*.db
+
+# ── Config ───────────────────────────────────────────────────────────────────
+# Local config overrides (user secrets, API keys)
+config.toml
+config.local.toml
+.env
+.env.*
+
+# ── OS / Editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Logs / Temp ───────────────────────────────────────────────────────────────
+*.log
+tmp/
+temp/

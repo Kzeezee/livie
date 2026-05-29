@@ -1,0 +1,265 @@
+package components
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
+	tui "github.com/kez/livie/tui"
+)
+
+// MsgType classifies a message for rendering.
+type MsgType int
+
+const (
+	MsgUser MsgType = iota
+	MsgAssistant
+	MsgSystem
+	MsgError
+	MsgCommand
+	// Future: MsgToolCall, MsgStreaming, MsgImage
+)
+
+// Message is a single entry in the conversation history.
+type Message struct {
+	Type      MsgType
+	Content   string
+	Timestamp time.Time
+}
+
+// NewMessage creates a message with the current timestamp.
+func NewMessage(t MsgType, content string) Message {
+	return Message{Type: t, Content: content, Timestamp: time.Now()}
+}
+
+// MessagesModel manages the scrollable message history.
+type MessagesModel struct {
+	viewport     viewport.Model
+	messages     []Message
+	renderer     *glamour.TermRenderer
+	width        int
+	height       int
+	atBottom     bool
+	newWhileAway bool // new messages arrived while scrolled up
+}
+
+// NewMessagesModel creates a new MessagesModel.
+func NewMessagesModel(width, height int) MessagesModel {
+	vp := viewport.New(width, height)
+	vp.SetContent("")
+
+	r, _ := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(width-4),
+	)
+
+	return MessagesModel{
+		viewport: vp,
+		width:    width,
+		height:   height,
+		renderer: r,
+		atBottom: true,
+	}
+}
+
+// SetSize updates the viewport dimensions.
+func (m *MessagesModel) SetSize(width, height int) {
+	m.width = width
+	m.height = height
+	m.viewport.Width = width
+	m.viewport.Height = height
+	if m.renderer != nil {
+		m.renderer, _ = glamour.NewTermRenderer(
+			glamour.WithStandardStyle("dark"),
+			glamour.WithWordWrap(width-4),
+		)
+	}
+	m.refresh()
+}
+
+// AddMessage appends a message and refreshes the viewport.
+func (m *MessagesModel) AddMessage(msg Message) {
+	m.messages = append(m.messages, msg)
+	wasAtBottom := m.atBottom
+	m.refresh()
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+		m.atBottom = true
+	} else {
+		m.newWhileAway = true
+	}
+}
+
+// Init implements tea.Model.
+func (m MessagesModel) Init() tea.Cmd { return nil }
+
+// Update handles scroll events.
+func (m MessagesModel) Update(msg tea.Msg) (MessagesModel, tea.Cmd) {
+	var cmd tea.Cmd
+
+	prevOffset := m.viewport.YOffset
+	m.viewport, cmd = m.viewport.Update(msg)
+
+	// Track whether we're at the bottom
+	atBottom := m.viewport.AtBottom()
+	if atBottom {
+		m.atBottom = true
+		m.newWhileAway = false
+	} else if m.viewport.YOffset != prevOffset {
+		m.atBottom = false
+	}
+
+	return m, cmd
+}
+
+// GotoBottom scrolls to the bottom.
+func (m *MessagesModel) GotoBottom() {
+	m.viewport.GotoBottom()
+	m.atBottom = true
+	m.newWhileAway = false
+}
+
+// GotoTop scrolls to the top.
+func (m *MessagesModel) GotoTop() {
+	m.viewport.GotoTop()
+	m.atBottom = false
+}
+
+// ScrollUp scrolls up by half the viewport height.
+func (m *MessagesModel) ScrollUp() {
+	m.viewport.HalfViewUp()
+	m.atBottom = false
+}
+
+// ScrollDown scrolls down by half the viewport height.
+func (m *MessagesModel) ScrollDown() {
+	m.viewport.HalfViewDown()
+	m.atBottom = m.viewport.AtBottom()
+	if m.atBottom {
+		m.newWhileAway = false
+	}
+}
+
+// View renders the message viewport.
+func (m MessagesModel) View() string {
+	view := m.viewport.View()
+
+	// Show "↓ new messages" nudge when scrolled up and new content arrived
+	if m.newWhileAway && !m.atBottom {
+		nudge := tui.StyleAccentAmber.Render("↓ new messages")
+		nudgeLine := lipgloss.NewStyle().
+			Width(m.width).
+			Align(lipgloss.Right).
+			Render(nudge + "  ")
+		// Overlay at bottom of viewport area — just append as a suffix line
+		view = view + "\n" + nudgeLine
+	}
+
+	return view
+}
+
+// refresh re-renders all messages into the viewport.
+func (m *MessagesModel) refresh() {
+	var sb strings.Builder
+	for i, msg := range m.messages {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(m.renderMessage(msg))
+	}
+	m.viewport.SetContent(sb.String())
+}
+
+func (m *MessagesModel) renderMessage(msg Message) string {
+	ts := tui.StyleDim.Render(msg.Timestamp.Format("15:04"))
+	sep := tui.StyleDivider.Render(" │ ")
+
+	switch msg.Type {
+	case MsgUser:
+		prefix := tui.StyleMsgUser.Render("▶ you")
+		header := prefix + tui.StyleDim.Render("  "+msg.Timestamp.Format("15:04"))
+		body := wrapText(msg.Content, m.width-4)
+		return header + "\n" + tui.StyleLabel.Render("  "+body) + "\n"
+
+	case MsgAssistant:
+		prefix := tui.StyleMsgAssistant.Render("◆ livie")
+		header := prefix + tui.StyleDim.Render("  "+msg.Timestamp.Format("15:04"))
+		body := m.renderMarkdown(msg.Content)
+		return header + "\n" + body + "\n"
+
+	case MsgSystem:
+		_ = ts
+		_ = sep
+		line := tui.StyleMsgSystem.Render("  — " + msg.Content + " —")
+		return centred(line, m.width) + "\n"
+
+	case MsgError:
+		prefix := tui.StyleMsgError.Render("✕ error")
+		header := prefix + tui.StyleDim.Render("  "+msg.Timestamp.Format("15:04"))
+		body := tui.StyleAccentRose.Render("  " + msg.Content)
+		return header + "\n" + body + "\n"
+
+	case MsgCommand:
+		prefix := tui.StyleCommand.Render("⌘")
+		return prefix + " " + tui.StyleAccentPurple.Render(msg.Content) + "\n"
+
+	default:
+		return msg.Content + "\n"
+	}
+}
+
+func (m *MessagesModel) renderMarkdown(content string) string {
+	if m.renderer == nil {
+		return "  " + content
+	}
+	rendered, err := m.renderer.Render(content)
+	if err != nil {
+		return "  " + content
+	}
+	// Indent slightly
+	lines := strings.Split(strings.TrimRight(rendered, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = "  " + l
+	}
+	return strings.Join(lines, "\n")
+}
+
+func centred(s string, width int) string {
+	vis := lipgloss.Width(s)
+	if vis >= width {
+		return s
+	}
+	pad := (width - vis) / 2
+	return strings.Repeat(" ", pad) + s
+}
+
+func wrapText(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return s
+	}
+	var lines []string
+	line := words[0]
+	for _, w := range words[1:] {
+		if len(line)+1+len(w) <= width {
+			line += " " + w
+		} else {
+			lines = append(lines, line)
+			line = w
+		}
+	}
+	lines = append(lines, line)
+	return strings.Join(lines, "\n  ")
+}
+
+
+
+// Ensure fmt is used
+var _ = fmt.Sprintf
