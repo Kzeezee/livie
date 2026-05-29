@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/kez/livie/config"
 	tui "github.com/kez/livie/tui"
 )
@@ -122,6 +122,7 @@ func renderWelcomeFooter() string {
 
 	keyLine := tui.StyleLabel.Render("Keys:") + "  " +
 		tui.StyleValue.Render("shift+tab") + tui.StyleLabel.Render(" toggle bash mode   ") +
+		tui.StyleValue.Render("shift+enter") + tui.StyleLabel.Render(" new line   ") +
 		tui.StyleValue.Render("ctrl+u") + tui.StyleLabel.Render(" clear input   ") +
 		tui.StyleValue.Render("ctrl+c") + tui.StyleLabel.Render(" quit")
 

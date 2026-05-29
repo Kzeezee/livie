@@ -87,9 +87,8 @@ func (r *CommandRegistry) HelpText() string {
 	}
 	sb.WriteString("\n**Keyboard Shortcuts**\n\n")
 	sb.WriteString("- `shift+tab` — toggle Chat / Bash mode\n")
+	sb.WriteString("- `ctrl+j` / `shift+enter` — insert new line (shift+enter requires Kitty terminal)\n")
 	sb.WriteString("- `ctrl+u` — clear input\n")
-	sb.WriteString("- `↑/k`, `↓/j` — scroll history\n")
-	sb.WriteString("- `g` / `G` — scroll to top / bottom\n")
 	sb.WriteString("- `ctrl+c` × 2 — quit\n")
 	return sb.String()
 }

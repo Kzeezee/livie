@@ -4,9 +4,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/kez/livie/config"
 	"github.com/kez/livie/tui"
 	"github.com/kez/livie/tui/components"
@@ -34,12 +34,13 @@ type ChatModel struct {
 }
 
 const (
-	hudHeight   = 1
-	inputHeight = 3
+	hudHeight = 1
+	divHeight = 1 // the ─── divider line
 )
 
 func NewChatModel(cfg *config.Config, width, height int) ChatModel {
-	vpH := viewportH(height)
+	inputModel := components.NewInputModel(width)
+	vpH := viewportH(height, inputModel.Height())
 
 	m := ChatModel{
 		cfg:      cfg,
@@ -47,7 +48,7 @@ func NewChatModel(cfg *config.Config, width, height int) ChatModel {
 		registry: tui.NewCommandRegistry(),
 		hud:      components.DefaultHUDState(),
 		messages: components.NewMessagesModel(width, vpH),
-		input:    components.NewInputModel(width),
+		input:    inputModel,
 		width:    width,
 		height:   height,
 		mode:     components.ModeChat,
@@ -79,9 +80,16 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		m.height = msg.Height
 		m.relayout()
 
-	case tea.KeyMsg:
-		if cmd := m.handleKey(msg); cmd != nil {
+	case tea.KeyPressMsg:
+		handled, cmd := m.handleKey(msg)
+		if cmd != nil {
 			cmds = append(cmds, cmd)
+		}
+		if handled {
+			// Key was consumed — run auto-grow then return without forwarding
+			// the key to the textarea (prevents double-handling).
+			m.syncInputHeight()
+			return m, tea.Batch(cmds...)
 		}
 
 	case tui.CommandActionMsg:
@@ -96,6 +104,7 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 	var inputCmd tea.Cmd
 	m.input, inputCmd = m.input.Update(msg)
 	cmds = append(cmds, inputCmd)
+	m.syncInputHeight()
 
 	var c tea.Cmd
 	m.messages, c = m.messages.Update(msg)
@@ -104,17 +113,23 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m *ChatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
+func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 	switch {
+	// ctrl+j always works. shift+enter only fires on Kitty-protocol terminals;
+	// on standard terminals it is indistinguishable from plain enter.
+	case msg.String() == "shift+enter" || msg.String() == "ctrl+j":
+		m.input.InsertNewline()
+		return true, nil
+
 	case key.Matches(msg, m.keys.Quit):
 		if m.quitFirst && time.Since(m.quitFirstAt) < 500*time.Millisecond {
-			return tea.Quit
+			return true, tea.Quit
 		}
 		m.quitFirst = true
 		m.quitFirstAt = time.Now()
 		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "press ctrl+c again to quit"))
 		m.messages.GotoBottom()
-		return tea.Tick(600*time.Millisecond, func(t time.Time) tea.Msg {
+		return true, tea.Tick(600*time.Millisecond, func(t time.Time) tea.Msg {
 			return quitConfirmMsg{}
 		})
 
@@ -122,6 +137,7 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		if m.mode == components.ModeBash {
 			m.setMode(components.ModeChat)
 		}
+		return true, nil
 
 	case key.Matches(msg, m.keys.ToggleMode):
 		if m.mode == components.ModeChat {
@@ -129,15 +145,17 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		} else {
 			m.setMode(components.ModeChat)
 		}
+		return true, nil
 
 	case key.Matches(msg, m.keys.ClearInput):
 		m.input.Reset()
+		return true, nil
 
 	case key.Matches(msg, m.keys.Submit):
-		return m.handleSubmit()
+		return true, m.handleSubmit()
 	}
 
-	return nil
+	return false, nil
 }
 
 func (m *ChatModel) handleSubmit() tea.Cmd {
@@ -173,7 +191,7 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 		return tea.Quit
 
 	case tui.ActionNew:
-		vpH := viewportH(m.height)
+		vpH := viewportH(m.height, m.input.Height())
 		m.messages = components.NewMessagesModel(m.width, vpH)
 		m.showWelcome()
 
@@ -200,26 +218,49 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 	m.messages.GotoBottom()
 }
 
-func (m *ChatModel) relayout() {
-	vpH := viewportH(m.height)
-	m.messages.SetSize(m.width, vpH)
-	m.input.SetWidth(m.width)
+// syncInputHeight resizes the messages viewport whenever the input box height changes.
+func (m *ChatModel) syncInputHeight() {
+	m.messages.SetSize(m.width, viewportH(m.height, m.input.Height()))
 }
 
-func (m ChatModel) View() string {
+func (m *ChatModel) relayout() {
+	m.input.SetWidth(m.width)
+	vpH := viewportH(m.height, m.input.Height())
+	m.messages.SetSize(m.width, vpH)
+}
+
+func (m ChatModel) View() tea.View {
 	hud := components.RenderHUD(m.hud, m.width)
 	divider := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(tui.ColBorder)).
 		Render(strings.Repeat("─", m.width))
 
-	return lipgloss.JoinVertical(
+	content := lipgloss.JoinVertical(
 		lipgloss.Left,
 		hud,
 		divider,
 		m.messages.View(),
 		m.input.View(),
 	)
+	v := tea.NewView(content)
+	v.AltScreen = true
+	return v
 }
+
+// Mode returns the current input mode of the chat screen.
+func (m ChatModel) Mode() components.InputMode { return m.mode }
+
+// TermWidth returns the last known terminal width.
+func (m ChatModel) TermWidth() int { return m.width }
+
+// TermHeight returns the last known terminal height.
+func (m ChatModel) TermHeight() int { return m.height }
+
+// InputHeight returns the current rendered height of the input box.
+func (m ChatModel) InputHeight() int { return m.input.Height() }
+
+// Input returns a read-only view of the input model for inspection in tests.
+func (m ChatModel) Input() components.InputModel { return m.input }
 
 // TransitionToWelcome is no longer used — welcome is part of the chat screen.
 // Kept as a type so existing references compile cleanly.
@@ -227,8 +268,12 @@ type TransitionToWelcome struct{}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-func viewportH(totalH int) int {
-	h := totalH - hudHeight - inputHeight - 1
+// ViewportH returns the height available for the messages viewport given the
+// total terminal height and the current input box height.
+func ViewportH(totalH, inputH int) int { return viewportH(totalH, inputH) }
+
+func viewportH(totalH, inputH int) int {
+	h := totalH - hudHeight - divHeight - inputH
 	if h < 1 {
 		h = 1
 	}

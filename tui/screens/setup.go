@@ -11,8 +11,8 @@ package screens
 import (
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	tui "github.com/kez/livie/tui"
 )
 
@@ -45,11 +45,14 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 	return m, nil
 }
 
-func (m SetupModel) View() string {
+func (m SetupModel) View() tea.View {
 	msg := tui.StyleDim.Render("Setup coming soon — skipping...")
-	return lipgloss.NewStyle().
+	content := lipgloss.NewStyle().
 		Width(m.width).
 		Height(m.height).
 		Align(lipgloss.Center, lipgloss.Center).
 		Render(msg)
+	v := tea.NewView(content)
+	v.AltScreen = true
+	return v
 }

@@ -3,7 +3,7 @@
 package app
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/kez/livie/config"
 	"github.com/kez/livie/tui/screens"
 )
@@ -68,12 +68,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
 	switch m.current {
 	case screenSetup:
 		return m.setup.View()
 	case screenChat:
 		return m.chat.View()
 	}
-	return ""
+	return tea.NewView("")
 }

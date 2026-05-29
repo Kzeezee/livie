@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/kez/livie/app"
 	"github.com/kez/livie/config"
 )
@@ -14,8 +14,6 @@ func main() {
 
 	p := tea.NewProgram(
 		app.New(cfg),
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 	)
 
 	if _, err := p.Run(); err != nil {

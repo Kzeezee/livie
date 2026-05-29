@@ -5,11 +5,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	tui "github.com/kez/livie/tui"
 )
 
@@ -51,7 +51,7 @@ type MessagesModel struct {
 
 // NewMessagesModel creates a new MessagesModel.
 func NewMessagesModel(width, height int) MessagesModel {
-	vp := viewport.New(width, height)
+	vp := viewport.New(viewport.WithWidth(width), viewport.WithHeight(height))
 	vp.SetContent("")
 	// Disable the viewport's built-in key bindings — all scrolling is
 	// controlled programmatically to avoid key conflicts with the input.
@@ -82,8 +82,8 @@ func NewMessagesModel(width, height int) MessagesModel {
 func (m *MessagesModel) SetSize(width, height int) {
 	m.width = width
 	m.height = height
-	m.viewport.Width = width
-	m.viewport.Height = height
+	m.viewport.SetWidth(width)
+	m.viewport.SetHeight(height)
 	if m.renderer != nil {
 		m.renderer, _ = glamour.NewTermRenderer(
 			glamour.WithStandardStyle("dark"),
@@ -123,7 +123,7 @@ func (m MessagesModel) Init() tea.Cmd { return nil }
 func (m MessagesModel) Update(msg tea.Msg) (MessagesModel, tea.Cmd) {
 	var cmd tea.Cmd
 
-	prevOffset := m.viewport.YOffset
+	prevOffset := m.viewport.YOffset()
 	m.viewport, cmd = m.viewport.Update(msg)
 
 	// Track whether we're at the bottom
@@ -131,7 +131,7 @@ func (m MessagesModel) Update(msg tea.Msg) (MessagesModel, tea.Cmd) {
 	if atBottom {
 		m.atBottom = true
 		m.newWhileAway = false
-	} else if m.viewport.YOffset != prevOffset {
+	} else if m.viewport.YOffset() != prevOffset {
 		m.atBottom = false
 	}
 
@@ -153,13 +153,13 @@ func (m *MessagesModel) GotoTop() {
 
 // ScrollUp scrolls up by half the viewport height.
 func (m *MessagesModel) ScrollUp() {
-	m.viewport.HalfViewUp()
+	m.viewport.HalfPageUp()
 	m.atBottom = false
 }
 
 // ScrollDown scrolls down by half the viewport height.
 func (m *MessagesModel) ScrollDown() {
-	m.viewport.HalfViewDown()
+	m.viewport.HalfPageDown()
 	m.atBottom = m.viewport.AtBottom()
 	if m.atBottom {
 		m.newWhileAway = false
