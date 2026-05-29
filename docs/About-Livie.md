@@ -6,7 +6,7 @@
 
 ## What Is Livie?
 
-Livie is a TUI-first AI assistant written in Go using the [Bubbletea](https://github.com/charmbracelet/bubbletea) framework. It runs entirely inside the terminal and is designed to be fast, composable, and unconstrained. Livie connects to any OpenAI-compatible API endpoint — remote or local — and can run its own GGUF models directly inside the terminal via an embedded model runner.
+Livie is a TUI-first AI assistant written in Go using the [Bubbletea V2](https://github.com/charmbracelet/bubbletea) framework. It runs entirely inside the terminal and is designed to be fast, composable, and unconstrained. Livie connects to any OpenAI-compatible API endpoint — remote or local — and can run its own GGUF models directly inside the terminal via an embedded model runner.
 
 Livie is not a chatbot wrapper. It is a living assistant that can execute commands, manage skills, index your media, remember context across sessions, and modify its own source code and configuration. It is designed to grow with use.
 
@@ -27,7 +27,7 @@ Livie is not a chatbot wrapper. It is a living assistant that can execute comman
 | Layer | Choice |
 |---|---|
 | Language | Go |
-| TUI Framework | [Bubbletea](https://github.com/charmbracelet/bubbletea) |
+| TUI Framework | [Bubbletea V2](https://github.com/charmbracelet/bubbletea) |
 | TUI Styling | [Lipgloss](https://github.com/charmbracelet/lipgloss) |
 | TUI Components | [Bubbles](https://github.com/charmbracelet/bubbles) |
 | Model API | OpenAI-compatible REST (configurable base URL) |
