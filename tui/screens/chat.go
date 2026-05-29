@@ -34,8 +34,8 @@ type ChatModel struct {
 }
 
 const (
-	hudHeight = 1
-	divHeight = 1 // the ─── divider line
+	hudHeight = components.HUDHeight // 3 rows
+	divHeight = 2                    // divider above input + divider above HUD
 )
 
 func NewChatModel(cfg *config.Config, width, height int) ChatModel {
@@ -237,10 +237,11 @@ func (m ChatModel) View() tea.View {
 
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
-		hud,
-		divider,
 		m.messages.View(),
+		divider,
 		m.input.View(),
+		divider,
+		hud,
 	)
 	v := tea.NewView(content)
 	v.AltScreen = true

@@ -217,7 +217,7 @@ func (m *MessagesModel) renderMessage(msg Message) string {
 		_ = ts
 		_ = sep
 		line := tui.StyleMsgSystem.Render("  — " + msg.Content + " —")
-		return centred(line, m.width) + "\n"
+		return line + "\n"
 
 	case MsgError:
 		prefix := tui.StyleMsgError.Render("✕ error")

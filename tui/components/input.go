@@ -29,7 +29,7 @@ func NewInputModel(width int) InputModel {
 	ta.Placeholder = "Type a message... (/help for commands)"
 	ta.ShowLineNumbers = false
 	ta.MaxHeight = InputMaxLines
-	ta.SetWidth(width - 6) // account for border + prefix
+	ta.SetWidth(width - 2) // account for prefix glyph + space
 	ta.SetHeight(InputMinLines)
 	ta.Focus()
 
@@ -67,12 +67,9 @@ func (m InputModel) IsDisabled() bool { return m.disabled }
 func (m InputModel) Width() int { return m.width }
 
 // TextareaHeight returns the textarea's current rendered height in rows.
-// This is the value controlled by SetHeight and determines how many lines
-// are visible inside the box — useful for verifying auto-grow behaviour.
 func (m InputModel) TextareaHeight() int { return m.textarea.Height() }
 
 // SetValue sets the textarea content directly.
-// Useful for tests and for programmatic pre-population.
 func (m *InputModel) SetValue(s string) {
 	m.textarea.SetValue(s)
 	m.autoGrow()
@@ -98,11 +95,11 @@ func (m *InputModel) SetDisabled(disabled bool) {
 // SetWidth updates the input width.
 func (m *InputModel) SetWidth(width int) {
 	m.width = width
-	m.textarea.SetWidth(width - 6)
+	m.textarea.SetWidth(width - 2)
 }
 
-// Height returns the current rendered height of the input box in terminal rows,
-// including the border (2 rows) and the textarea content rows.
+// Height returns the current rendered height of the input in terminal rows.
+// This is purely the textarea content rows (no border — the input is borderless).
 func (m InputModel) Height() int {
 	lines := m.textarea.LineCount()
 	if lines < InputMinLines {
@@ -111,7 +108,7 @@ func (m InputModel) Height() int {
 	if lines > InputMaxLines {
 		lines = InputMaxLines
 	}
-	return lines + 2 // +2 for top/bottom border
+	return lines
 }
 
 // Value returns the current input text.
@@ -126,10 +123,6 @@ func (m *InputModel) Reset() {
 }
 
 // InsertNewline appends a newline at the end of the current value.
-// Note: this always appends to the end (cursor position is not preserved)
-// because the bubbles textarea does not expose an insert-at-cursor API.
-// shift+enter only fires on terminals supporting the Kitty keyboard protocol;
-// ctrl+j is the universal fallback.
 func (m *InputModel) InsertNewline() {
 	m.textarea.SetValue(m.textarea.Value() + "\n")
 	m.autoGrow()
@@ -162,7 +155,6 @@ func (m *InputModel) Focus() tea.Cmd {
 
 // Init implements tea.Model.
 func (m InputModel) Init() tea.Cmd {
-	// textarea.Blink() returns a tea.Msg, wrap it as a Cmd.
 	return func() tea.Msg { return textarea.Blink() }
 }
 
@@ -177,45 +169,21 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 	return m, cmd
 }
 
-// View renders the styled input bar.
+// View renders the borderless input area.
+// The glyph on the left indicates mode; the textarea fills the rest of the line.
 func (m InputModel) View() string {
-	// Choose prefix glyph and border style based on mode / command state
-	var prefix string
-	var borderStyle lipgloss.Style
+	var glyph string
 
-	if m.disabled {
-		prefix = tui.StyleMuted.Render("◌")
-		borderStyle = tui.StyleBorder
-	} else if m.IsCommand() {
-		prefix = tui.StyleAccentPurple.Render("⌘")
-		borderStyle = tui.StyleBorder.BorderForeground(lipgloss.Color(tui.ColAccentPurple))
-	} else {
-		switch m.mode {
-		case ModeBash:
-			prefix = tui.StyleAccentRose.Render("▶")
-			borderStyle = tui.StyleBorderFocusBash
-		default:
-			prefix = tui.StyleAccentCyan.Render("▶")
-			borderStyle = tui.StyleBorderFocusQuery
-		}
+	switch {
+	case m.disabled:
+		glyph = tui.StyleMuted.Render("◌")
+	case m.IsCommand():
+		glyph = tui.StyleAccentPurple.Render("⌘")
+	case m.mode == ModeBash:
+		glyph = tui.StyleAccentRose.Render("▶")
+	default:
+		glyph = tui.StyleAccentCyan.Render("▶")
 	}
 
-	// Submit hint
-	var hint string
-	if m.disabled {
-		hint = tui.StyleMuted.Render("[…]")
-	} else if len(strings.TrimSpace(m.textarea.Value())) > 0 {
-		hint = tui.StyleAccentCyan.Render("[↵]")
-	} else {
-		hint = tui.StyleMuted.Render("[↵]")
-	}
-
-	inner := lipgloss.JoinHorizontal(
-		lipgloss.Center,
-		prefix+" ",
-		m.textarea.View(),
-		" "+hint,
-	)
-
-	return borderStyle.Width(m.width - 2).Render(inner)
+	return lipgloss.JoinHorizontal(lipgloss.Top, glyph+" ", m.textarea.View())
 }

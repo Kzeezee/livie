@@ -32,7 +32,7 @@ func TestInput_InitialValue(t *testing.T) {
 
 func TestInput_InitialHeight(t *testing.T) {
 	m := newInput()
-	want := components.InputMinLines + 2
+	want := components.InputMinLines // borderless: height == textarea line count
 	if got := m.Height(); got != want {
 		t.Errorf("expected initial height %d, got %d", want, got)
 	}
@@ -121,7 +121,7 @@ func TestReset_ShrinksHeightToMinimum(t *testing.T) {
 	m.InsertNewline()
 	m.InsertNewline()
 	m.Reset()
-	want := components.InputMinLines + 2
+	want := components.InputMinLines // borderless: resets to min line count
 	if got := m.Height(); got != want {
 		t.Errorf("expected height %d after Reset, got %d", want, got)
 	}
@@ -171,7 +171,7 @@ func TestInsertNewline_CapsAtMaxLines(t *testing.T) {
 	for i := 0; i < components.InputMaxLines+5; i++ {
 		m.InsertNewline()
 	}
-	wantModelH := components.InputMaxLines + 2
+	wantModelH := components.InputMaxLines // borderless: height == textarea line count
 	if got := m.Height(); got != wantModelH {
 		t.Errorf("expected model height capped at %d, got %d", wantModelH, got)
 	}
@@ -190,18 +190,19 @@ func TestInsertNewline_OnEmptyValue(t *testing.T) {
 
 // ── Height ────────────────────────────────────────────────────────────────────
 
-func TestHeight_MinimumIsThree(t *testing.T) {
+func TestHeight_MinimumIsOne(t *testing.T) {
 	m := newInput()
-	if got := m.Height(); got < 3 {
-		t.Errorf("height should be at least 3, got %d", got)
+	if got := m.Height(); got < components.InputMinLines {
+		t.Errorf("height should be at least %d, got %d", components.InputMinLines, got)
 	}
 }
 
-func TestHeight_TwoLinesGivesFour(t *testing.T) {
+func TestHeight_TwoLinesGivesTwo(t *testing.T) {
 	m := newInput()
 	m.InsertNewline()
-	if got := m.Height(); got != 4 {
-		t.Errorf("expected height=4 for 2 lines, got %d", got)
+	// After one InsertNewline on empty input: 2 lines → Height() == 2
+	if got := m.Height(); got != 2 {
+		t.Errorf("expected height=2 for 2 lines, got %d", got)
 	}
 }
 

@@ -34,10 +34,10 @@ func typeText(m screens.ChatModel, s string) screens.ChatModel {
 // ── ViewportH ────────────────────────────────────────────────────────────────
 
 func TestViewportH_Normal(t *testing.T) {
-	// 36 total - 1 HUD - 1 divider - 3 input = 31
+	// 36 total - 3 HUD rows - 2 dividers - 3 input = 28
 	got := screens.ViewportH(36, 3)
-	if got != 31 {
-		t.Errorf("ViewportH(36, 3) = %d, want 31", got)
+	if got != 28 {
+		t.Errorf("ViewportH(36, 3) = %d, want 28", got)
 	}
 }
 

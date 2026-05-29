@@ -18,6 +18,9 @@ const (
 	ModeBash
 )
 
+// HUDHeight is the number of terminal rows the HUD occupies.
+const HUDHeight = 3
+
 func (m InputMode) String() string {
 	switch m {
 	case ModeBash:
@@ -35,7 +38,8 @@ type HUDState struct {
 	TokensUsed   int
 	TokensMax    int
 	SkillCount   int
-	// Future: RunnerStatus, PendingToolCalls, IndexingActive
+	StatusMsg    string // e.g. "Ready", "Connecting to model...", "Error loading config"
+	StatusOK     bool   // true = green ✓, false = rose ✗
 }
 
 // DefaultHUDState returns stub values for Phase 1.
@@ -47,57 +51,75 @@ func DefaultHUDState() HUDState {
 		TokensUsed:   0,
 		TokensMax:    0,
 		SkillCount:   0,
+		StatusMsg:    "Ready",
+		StatusOK:     true,
 	}
 }
 
-// RenderHUD renders the single-line HUD bar at the given width.
+// RenderHUD renders the 3-row HUD bar at the given width.
+//
+// Row 1 — working directory + active mode badge
+// Row 2 — token usage (left) · endpoint + model (right)
+// Row 3 — status indicator
 func RenderHUD(state HUDState, width int) string {
+	inner := width - 2 // lipgloss Padding(0,1) consumes 1 col each side
+
+	// ── Row 1: ~/dir  (MODE) ─────────────────────────────────────────────────
 	dir := currentDir()
+	dirStr := tui.StyleLabel.Render(truncateDir(dir, 36))
+	modeTag := renderModeBadge(state.Mode)
+	row1Content := dirStr + "  " + modeTag
 
-	// Left segment: ◆ livie  │  ~/dir  │  MODE
-	appName := tui.StyleAccentCyan.Render("◆ livie")
-	dirStr := tui.StyleLabel.Render(truncateDir(dir, 24))
-	modeBadge := renderModeBadge(state.Mode)
-
-	left := appName + tui.StyleDivider.Render("  │  ") +
-		dirStr + tui.StyleDivider.Render("  │  ") +
-		modeBadge
-
-	// Right segment: model @ endpoint  │  tokens  │  N skills
-	modelStr := tui.StyleValue.Render(truncate(state.ModelName, 20)) +
-		tui.StyleLabel.Render(" @ ") +
-		tui.StyleLabel.Render(state.EndpointName)
-
+	// ── Row 2: tokens · skills (left)   (endpoint) model (right) ─────────────
 	tokenStr := renderTokens(state.TokensUsed, state.TokensMax)
-	skillStr := tui.StyleMuted.Render(fmt.Sprintf("%d skills", state.SkillCount))
+	skillStr := tui.StyleMuted.Render(fmt.Sprintf("· %d skills", state.SkillCount))
+	statsLeft := tokenStr + "  " + skillStr
 
-	right := modelStr + tui.StyleDivider.Render("  │  ") +
-		tokenStr + tui.StyleDivider.Render("  │  ") +
-		skillStr
+	endpointStr := tui.StyleMuted.Render("(" + truncate(state.EndpointName, 12) + ")")
+	modelStr := tui.StyleValue.Render(" " + truncate(state.ModelName, 24))
+	statsRight := endpointStr + modelStr
 
-	// Measure visible widths and pad middle
-	leftWidth := lipgloss.Width(left)
-	rightWidth := lipgloss.Width(right)
-	padding := width - leftWidth - rightWidth - 2 // 2 for outer padding
-	if padding < 1 {
-		padding = 1
+	lw2 := lipgloss.Width(statsLeft)
+	rw2 := lipgloss.Width(statsRight)
+	pad2 := inner - lw2 - rw2
+	if pad2 < 1 {
+		pad2 = 1
 	}
-	mid := strings.Repeat(" ", padding)
+	row2Content := statsLeft + strings.Repeat(" ", pad2) + statsRight
 
-	line := tui.StyleHUD.
-		Width(width).
-		Render(left + mid + right)
+	// ── Row 3: ✓/✗ status ────────────────────────────────────────────────────
+	row3Content := renderStatusLine(state.StatusMsg, state.StatusOK)
 
-	return line
+	// ── Render each row with surface background ───────────────────────────────
+	style := tui.StyleHUD.Width(width)
+
+	r1 := style.Render(row1Content)
+	r2 := style.Render(row2Content)
+	r3 := style.Render(row3Content)
+
+	return lipgloss.JoinVertical(lipgloss.Left, r1, r2, r3)
 }
 
+// renderModeBadge renders the inline mode indicator (no background box — just text).
 func renderModeBadge(mode InputMode) string {
 	switch mode {
 	case ModeBash:
-		return tui.StyleModeBadgeBash.Render(" BASH ")
+		return tui.StyleAccentRose.Render("(BASH)")
 	default:
-		return tui.StyleModeBadgeQuery.Render(" CHAT ")
+		return tui.StyleAccentCyan.Render("(CHAT)")
 	}
+}
+
+func renderStatusLine(msg string, ok bool) string {
+	if msg == "" {
+		return tui.StyleMuted.Render("—")
+	}
+	if ok {
+		tick := tui.StyleAccentGreen.Render("✓")
+		return tick + " " + tui.StyleLabel.Render(msg)
+	}
+	cross := tui.StyleAccentRose.Render("✗")
+	return cross + " " + tui.StyleLabel.Render(msg)
 }
 
 func renderTokens(used, max int) string {
@@ -143,7 +165,6 @@ func truncateDir(dir string, max int) string {
 	if len(parts) <= 2 {
 		return dir
 	}
-	// Keep first and last, abbreviate middle
 	result := parts[0]
 	for _, p := range parts[1 : len(parts)-1] {
 		if len(p) > 0 {
