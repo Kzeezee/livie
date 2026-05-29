@@ -10,7 +10,7 @@ const (
 	ColBorder       = "#4A4D6A"
 	ColTextPrimary  = "#E2E8F0"
 	ColTextSecondary = "#8D99AE"
-	ColTextMuted    = "#4A5568"
+	ColTextMuted    = "#718096"
 	ColAccentCyan   = "#4CC9F0"
 	ColAccentRose   = "#E94560"
 	ColAccentAmber  = "#F6A623"
