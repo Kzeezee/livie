@@ -17,8 +17,7 @@ const (
 	ActionNone AppAction = iota
 	ActionQuit
 	ActionNew
-	ActionClearHistory
-	ActionSetModeQuery
+	ActionSetModeChat
 	ActionSetModeBash
 )
 
@@ -87,8 +86,7 @@ func (r *CommandRegistry) HelpText() string {
 		sb.WriteString(fmt.Sprintf("- `/%s`%s — %s\n", cmd.Name, aliases, cmd.Description))
 	}
 	sb.WriteString("\n**Keyboard Shortcuts**\n\n")
-	sb.WriteString("- `ctrl+b` — toggle Query / Bash mode\n")
-	sb.WriteString("- `ctrl+l` — clear message history\n")
+	sb.WriteString("- `shift+tab` — toggle Chat / Bash mode\n")
 	sb.WriteString("- `ctrl+u` — clear input\n")
 	sb.WriteString("- `↑/k`, `↓/j` — scroll history\n")
 	sb.WriteString("- `g` / `G` — scroll to top / bottom\n")
@@ -105,34 +103,6 @@ func (r *CommandRegistry) registerBuiltins() {
 		Description: "Show all commands and keyboard shortcuts",
 		Handler: func(args []string) (string, AppAction) {
 			return r.HelpText(), ActionNone
-		},
-	})
-
-	// /clear
-	r.Register(&Command{
-		Name:        "clear",
-		Description: "Clear the message history",
-		Handler: func(args []string) (string, AppAction) {
-			return "", ActionClearHistory
-		},
-	})
-
-	// /mode
-	r.Register(&Command{
-		Name:        "mode",
-		Description: "Set interaction mode: /mode query  or  /mode bash",
-		Handler: func(args []string) (string, AppAction) {
-			if len(args) == 0 {
-				return "Usage: /mode [query|bash]", ActionNone
-			}
-			switch strings.ToLower(args[0]) {
-			case "query", "q":
-				return "", ActionSetModeQuery
-			case "bash", "b":
-				return "", ActionSetModeBash
-			default:
-				return fmt.Sprintf("Unknown mode: %q. Use 'query' or 'bash'.", args[0]), ActionNone
-			}
 		},
 	})
 

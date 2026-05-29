@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -52,6 +53,16 @@ type MessagesModel struct {
 func NewMessagesModel(width, height int) MessagesModel {
 	vp := viewport.New(width, height)
 	vp.SetContent("")
+	// Disable the viewport's built-in key bindings — all scrolling is
+	// controlled programmatically to avoid key conflicts with the input.
+	vp.KeyMap = viewport.KeyMap{
+		PageDown:     key.NewBinding(key.WithKeys()),
+		PageUp:       key.NewBinding(key.WithKeys()),
+		HalfPageUp:   key.NewBinding(key.WithKeys()),
+		HalfPageDown: key.NewBinding(key.WithKeys()),
+		Down:         key.NewBinding(key.WithKeys()),
+		Up:           key.NewBinding(key.WithKeys()),
+	}
 
 	r, _ := glamour.NewTermRenderer(
 		glamour.WithStandardStyle("dark"),

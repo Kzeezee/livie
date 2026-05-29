@@ -118,12 +118,11 @@ func renderWelcomeFooter() string {
 		tui.StyleCommand.Render("/new") + "  " +
 		tui.StyleCommand.Render("/skills") + "  " +
 		tui.StyleCommand.Render("/usage") + "  " +
-		tui.StyleCommand.Render("/clear") + "  " +
 		tui.StyleCommand.Render("/exit")
 
 	keyLine := tui.StyleLabel.Render("Keys:") + "  " +
-		tui.StyleValue.Render("ctrl+b") + tui.StyleLabel.Render(" toggle bash mode   ") +
-		tui.StyleValue.Render("ctrl+l") + tui.StyleLabel.Render(" clear   ") +
+		tui.StyleValue.Render("shift+tab") + tui.StyleLabel.Render(" toggle bash mode   ") +
+		tui.StyleValue.Render("ctrl+u") + tui.StyleLabel.Render(" clear input   ") +
 		tui.StyleValue.Render("ctrl+c") + tui.StyleLabel.Render(" quit")
 
 	return cmdLine + "\n" + keyLine

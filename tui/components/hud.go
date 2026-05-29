@@ -14,7 +14,7 @@ import (
 type InputMode int
 
 const (
-	ModeQuery InputMode = iota
+	ModeChat InputMode = iota
 	ModeBash
 )
 
@@ -23,7 +23,7 @@ func (m InputMode) String() string {
 	case ModeBash:
 		return "BASH"
 	default:
-		return "QUERY"
+		return "CHAT"
 	}
 }
 
@@ -41,7 +41,7 @@ type HUDState struct {
 // DefaultHUDState returns stub values for Phase 1.
 func DefaultHUDState() HUDState {
 	return HUDState{
-		Mode:         ModeQuery,
+		Mode:         ModeChat,
 		ModelName:    "(no model)",
 		EndpointName: "local",
 		TokensUsed:   0,
@@ -96,7 +96,7 @@ func renderModeBadge(mode InputMode) string {
 	case ModeBash:
 		return tui.StyleModeBadgeBash.Render(" BASH ")
 	default:
-		return tui.StyleModeBadgeQuery.Render(" QUERY ")
+		return tui.StyleModeBadgeQuery.Render(" CHAT ")
 	}
 }
 

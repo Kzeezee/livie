@@ -3,6 +3,7 @@ package components
 import (
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -28,6 +29,9 @@ func NewInputModel(width int) InputModel {
 	ta.Focus()
 
 	// Remove the default textarea border — we draw our own
+	// Remap insert-newline from enter to shift+enter so that enter can submit.
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"))
+
 	ta.FocusedStyle.Base = lipgloss.NewStyle()
 	ta.BlurredStyle.Base = lipgloss.NewStyle()
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle() // no highlight — keeps text readable
@@ -40,7 +44,7 @@ func NewInputModel(width int) InputModel {
 
 	return InputModel{
 		textarea: ta,
-		mode:     ModeQuery,
+		mode:     ModeChat,
 		width:    width,
 	}
 }

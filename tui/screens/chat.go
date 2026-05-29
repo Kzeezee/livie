@@ -28,9 +28,8 @@ type ChatModel struct {
 	width  int
 	height int
 
-	mode         components.InputMode
-	clearPending bool
-	quitFirst    bool
+	mode        components.InputMode
+	quitFirst   bool
 	quitFirstAt  time.Time
 }
 
@@ -51,7 +50,7 @@ func NewChatModel(cfg *config.Config, width, height int) ChatModel {
 		input:    components.NewInputModel(width),
 		width:    width,
 		height:   height,
-		mode:     components.ModeQuery,
+		mode:     components.ModeChat,
 	}
 
 	m.registry.Register(newCmd(m))
@@ -94,11 +93,9 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		m.quitFirst = false
 	}
 
-	if !m.clearPending {
-		var c tea.Cmd
-		m.input, c = m.input.Update(msg)
-		cmds = append(cmds, c)
-	}
+	var inputCmd tea.Cmd
+	m.input, inputCmd = m.input.Update(msg)
+	cmds = append(cmds, inputCmd)
 
 	var c tea.Cmd
 	m.messages, c = m.messages.Update(msg)
@@ -108,21 +105,6 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 }
 
 func (m *ChatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
-	// Confirmation mode: only y/n accepted
-	if m.clearPending {
-		switch msg.String() {
-		case "y", "Y":
-			m.clearPending = false
-			vpH := viewportH(m.height)
-			m.messages = components.NewMessagesModel(m.width, vpH)
-			m.showWelcome()
-		case "n", "N", "esc":
-			m.clearPending = false
-			m.messages.AddMessage(components.NewMessage(components.MsgSystem, "clear cancelled"))
-		}
-		return nil
-	}
-
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		if m.quitFirst && time.Since(m.quitFirstAt) < 500*time.Millisecond {
@@ -138,41 +120,18 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 
 	case key.Matches(msg, m.keys.Escape):
 		if m.mode == components.ModeBash {
-			m.setMode(components.ModeQuery)
+			m.setMode(components.ModeChat)
 		}
 
 	case key.Matches(msg, m.keys.ToggleMode):
-		if m.mode == components.ModeQuery {
+		if m.mode == components.ModeChat {
 			m.setMode(components.ModeBash)
 		} else {
-			m.setMode(components.ModeQuery)
+			m.setMode(components.ModeChat)
 		}
-
-	case key.Matches(msg, m.keys.ClearHistory):
-		m.clearPending = true
-		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "clear history? (y/n)"))
-		m.messages.GotoBottom()
 
 	case key.Matches(msg, m.keys.ClearInput):
 		m.input.Reset()
-
-	case key.Matches(msg, m.keys.GotoTop):
-		if m.input.Value() == "" {
-			m.messages.GotoTop()
-		}
-
-	case key.Matches(msg, m.keys.GotoBottom):
-		m.messages.GotoBottom()
-
-	case key.Matches(msg, m.keys.ScrollUp):
-		if m.input.Value() == "" {
-			m.messages.ScrollUp()
-		}
-
-	case key.Matches(msg, m.keys.ScrollDown):
-		if m.input.Value() == "" {
-			m.messages.ScrollDown()
-		}
 
 	case key.Matches(msg, m.keys.Submit):
 		return m.handleSubmit()
@@ -218,13 +177,8 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 		m.messages = components.NewMessagesModel(m.width, vpH)
 		m.showWelcome()
 
-	case tui.ActionClearHistory:
-		m.clearPending = true
-		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "clear history? (y/n)"))
-		m.messages.GotoBottom()
-
-	case tui.ActionSetModeQuery:
-		m.setMode(components.ModeQuery)
+	case tui.ActionSetModeChat:
+		m.setMode(components.ModeChat)
 
 	case tui.ActionSetModeBash:
 		m.setMode(components.ModeBash)
@@ -241,7 +195,7 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 	case components.ModeBash:
 		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "switched to BASH mode"))
 	default:
-		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "switched to QUERY mode"))
+		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "switched to CHAT mode"))
 	}
 	m.messages.GotoBottom()
 }
