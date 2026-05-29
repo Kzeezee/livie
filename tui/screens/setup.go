@@ -16,6 +16,9 @@ import (
 	tui "github.com/kez/livie/tui"
 )
 
+// TransitionToChat signals the app to move from setup to the chat screen.
+type TransitionToChat struct{}
+
 type SetupModel struct {
 	width  int
 	height int

@@ -30,8 +30,7 @@ func NewInputModel(width int) InputModel {
 	// Remove the default textarea border — we draw our own
 	ta.FocusedStyle.Base = lipgloss.NewStyle()
 	ta.BlurredStyle.Base = lipgloss.NewStyle()
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle().
-		Background(lipgloss.Color(tui.ColSurfaceHi))
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle() // no highlight — keeps text readable
 	ta.FocusedStyle.Placeholder = tui.StyleDim
 	ta.BlurredStyle.Placeholder = tui.StyleDim
 	ta.FocusedStyle.Text = lipgloss.NewStyle().

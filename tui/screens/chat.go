@@ -12,10 +12,10 @@ import (
 	"github.com/kez/livie/tui/components"
 )
 
-// quitConfirmMsg is sent when ctrl+c is pressed a second time.
+// quitConfirmMsg fires when the second ctrl+c window expires.
 type quitConfirmMsg struct{}
 
-// ChatModel is the primary chat interface.
+// ChatModel is the primary screen — welcome block + chat in one viewport.
 type ChatModel struct {
 	cfg      *config.Config
 	keys     tui.KeyMap
@@ -28,42 +28,43 @@ type ChatModel struct {
 	width  int
 	height int
 
-	mode          components.InputMode
-	clearPending  bool   // waiting for y/n confirmation on /clear
-	quitFirst     bool   // first ctrl+c press
-	quitFirstTime time.Time
+	mode         components.InputMode
+	clearPending bool
+	quitFirst    bool
+	quitFirstAt  time.Time
 }
 
 const (
 	hudHeight   = 1
-	inputHeight = 3 // minimum (border + 1 line + border)
+	inputHeight = 3
 )
 
 func NewChatModel(cfg *config.Config, width, height int) ChatModel {
-	vpHeight := height - hudHeight - inputHeight - 1
-	if vpHeight < 1 {
-		vpHeight = 1
-	}
+	vpH := viewportH(height)
 
 	m := ChatModel{
 		cfg:      cfg,
 		keys:     tui.DefaultKeyMap(),
 		registry: tui.NewCommandRegistry(),
 		hud:      components.DefaultHUDState(),
-		messages: components.NewMessagesModel(width, vpHeight),
+		messages: components.NewMessagesModel(width, vpH),
 		input:    components.NewInputModel(width),
 		width:    width,
 		height:   height,
 		mode:     components.ModeQuery,
 	}
 
-	// Seed with welcome message
-	m.messages.AddMessage(components.NewMessage(
-		components.MsgSystem,
-		"welcome to livie — type /help for commands",
-	))
-
+	m.registry.Register(newCmd(m))
+	m.showWelcome()
 	return m
+}
+
+// showWelcome renders the welcome block into the top of the viewport.
+func (m *ChatModel) showWelcome() {
+	block := RenderWelcomeBlock(m.cfg, m.width)
+	// Insert as a raw block message so it sits above any conversation
+	m.messages.AddRaw(block)
+	m.messages.GotoBottom()
 }
 
 func (m ChatModel) Init() tea.Cmd {
@@ -74,21 +75,18 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
-
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		m.relayout()
 
 	case tea.KeyMsg:
-		cmd := m.handleKey(msg)
-		if cmd != nil {
+		if cmd := m.handleKey(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 
 	case tui.CommandActionMsg:
-		cmd := m.handleCommandAction(msg)
-		if cmd != nil {
+		if cmd := m.handleAction(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 
@@ -96,29 +94,28 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		m.quitFirst = false
 	}
 
-	// Forward to input when not in a blocking state
 	if !m.clearPending {
-		var inputCmd tea.Cmd
-		m.input, inputCmd = m.input.Update(msg)
-		cmds = append(cmds, inputCmd)
+		var c tea.Cmd
+		m.input, c = m.input.Update(msg)
+		cmds = append(cmds, c)
 	}
 
-	// Forward scroll-related events to the message viewport
-	var vpCmd tea.Cmd
-	m.messages, vpCmd = m.messages.Update(msg)
-	cmds = append(cmds, vpCmd)
+	var c tea.Cmd
+	m.messages, c = m.messages.Update(msg)
+	cmds = append(cmds, c)
 
 	return m, tea.Batch(cmds...)
 }
 
 func (m *ChatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
-	// Clear confirmation mode — only accept y/n
+	// Confirmation mode: only y/n accepted
 	if m.clearPending {
 		switch msg.String() {
 		case "y", "Y":
 			m.clearPending = false
-			m.messages = components.NewMessagesModel(m.width, m.viewportHeight())
-			m.messages.AddMessage(components.NewMessage(components.MsgSystem, "history cleared"))
+			vpH := viewportH(m.height)
+			m.messages = components.NewMessagesModel(m.width, vpH)
+			m.showWelcome()
 		case "n", "N", "esc":
 			m.clearPending = false
 			m.messages.AddMessage(components.NewMessage(components.MsgSystem, "clear cancelled"))
@@ -128,14 +125,13 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 
 	switch {
 	case key.Matches(msg, m.keys.Quit):
-		if m.quitFirst && time.Since(m.quitFirstTime) < 500*time.Millisecond {
+		if m.quitFirst && time.Since(m.quitFirstAt) < 500*time.Millisecond {
 			return tea.Quit
 		}
 		m.quitFirst = true
-		m.quitFirstTime = time.Now()
-		m.messages.AddMessage(components.NewMessage(
-			components.MsgSystem, "press ctrl+c again to quit",
-		))
+		m.quitFirstAt = time.Now()
+		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "press ctrl+c again to quit"))
+		m.messages.GotoBottom()
 		return tea.Tick(600*time.Millisecond, func(t time.Time) tea.Msg {
 			return quitConfirmMsg{}
 		})
@@ -144,7 +140,6 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		if m.mode == components.ModeBash {
 			m.setMode(components.ModeQuery)
 		}
-		return nil
 
 	case key.Matches(msg, m.keys.ToggleMode):
 		if m.mode == components.ModeQuery {
@@ -152,39 +147,31 @@ func (m *ChatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		} else {
 			m.setMode(components.ModeQuery)
 		}
-		return nil
 
 	case key.Matches(msg, m.keys.ClearHistory):
 		m.clearPending = true
-		m.messages.AddMessage(components.NewMessage(
-			components.MsgSystem, "clear history? (y/n)",
-		))
-		return nil
+		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "clear history? (y/n)"))
+		m.messages.GotoBottom()
 
 	case key.Matches(msg, m.keys.ClearInput):
 		m.input.Reset()
-		return nil
 
 	case key.Matches(msg, m.keys.GotoTop):
 		if m.input.Value() == "" {
 			m.messages.GotoTop()
-			return nil
 		}
 
 	case key.Matches(msg, m.keys.GotoBottom):
 		m.messages.GotoBottom()
-		return nil
 
 	case key.Matches(msg, m.keys.ScrollUp):
 		if m.input.Value() == "" {
 			m.messages.ScrollUp()
-			return nil
 		}
 
 	case key.Matches(msg, m.keys.ScrollDown):
 		if m.input.Value() == "" {
 			m.messages.ScrollDown()
-			return nil
 		}
 
 	case key.Matches(msg, m.keys.Submit):
@@ -201,7 +188,6 @@ func (m *ChatModel) handleSubmit() tea.Cmd {
 	}
 	m.input.Reset()
 
-	// Command dispatch
 	if strings.HasPrefix(text, "/") {
 		m.messages.AddMessage(components.NewMessage(components.MsgCommand, text))
 		response, action := m.registry.Dispatch(text)
@@ -210,17 +196,14 @@ func (m *ChatModel) handleSubmit() tea.Cmd {
 		}
 	}
 
-	// Regular message — echo for now; Phase 2 wires in the AI backend
+	// Regular message — Phase 2 wires in AI backend
 	m.messages.AddMessage(components.NewMessage(components.MsgUser, text))
-	m.messages.AddMessage(components.NewMessage(
-		components.MsgSystem, "AI backend not yet connected — stay tuned",
-	))
+	m.messages.AddMessage(components.NewMessage(components.MsgSystem, "AI backend not yet connected"))
 	m.messages.GotoBottom()
 	return nil
 }
 
-func (m *ChatModel) handleCommandAction(msg tui.CommandActionMsg) tea.Cmd {
-	// Display response text if any
+func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 	if msg.Response != "" {
 		m.messages.AddMessage(components.NewMessage(components.MsgAssistant, msg.Response))
 		m.messages.GotoBottom()
@@ -230,14 +213,15 @@ func (m *ChatModel) handleCommandAction(msg tui.CommandActionMsg) tea.Cmd {
 	case tui.ActionQuit:
 		return tea.Quit
 
+	case tui.ActionNew:
+		vpH := viewportH(m.height)
+		m.messages = components.NewMessagesModel(m.width, vpH)
+		m.showWelcome()
+
 	case tui.ActionClearHistory:
 		m.clearPending = true
-		m.messages.AddMessage(components.NewMessage(
-			components.MsgSystem, "clear history? (y/n)",
-		))
-
-	case tui.ActionSwitchToWelcome:
-		return func() tea.Msg { return TransitionToWelcome{} }
+		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "clear history? (y/n)"))
+		m.messages.GotoBottom()
 
 	case tui.ActionSetModeQuery:
 		m.setMode(components.ModeQuery)
@@ -253,7 +237,6 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 	m.mode = mode
 	m.hud.Mode = mode
 	m.input.SetMode(mode)
-
 	switch mode {
 	case components.ModeBash:
 		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "switched to BASH mode"))
@@ -264,17 +247,9 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 }
 
 func (m *ChatModel) relayout() {
-	vpH := m.viewportHeight()
+	vpH := viewportH(m.height)
 	m.messages.SetSize(m.width, vpH)
 	m.input.SetWidth(m.width)
-}
-
-func (m ChatModel) viewportHeight() int {
-	h := m.height - hudHeight - inputHeight - 1
-	if h < 1 {
-		h = 1
-	}
-	return h
 }
 
 func (m ChatModel) View() string {
@@ -282,17 +257,38 @@ func (m ChatModel) View() string {
 	divider := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(tui.ColBorder)).
 		Render(strings.Repeat("─", m.width))
-	msgs := m.messages.View()
-	input := m.input.View()
 
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		hud,
 		divider,
-		msgs,
-		input,
+		m.messages.View(),
+		m.input.View(),
 	)
 }
 
-// TransitionToWelcome signals a return to the welcome screen.
+// TransitionToWelcome is no longer used — welcome is part of the chat screen.
+// Kept as a type so existing references compile cleanly.
 type TransitionToWelcome struct{}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+func viewportH(totalH int) int {
+	h := totalH - hudHeight - inputHeight - 1
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
+// newCmd returns the /new command registration, capturing the ChatModel pointer
+// via the action system rather than a direct reference.
+func newCmd(_ ChatModel) *tui.Command {
+	return &tui.Command{
+		Name:        "new",
+		Description: "Start a new conversation and return to the welcome screen",
+		Handler: func(args []string) (string, tui.AppAction) {
+			return "", tui.ActionNew
+		},
+	}
+}

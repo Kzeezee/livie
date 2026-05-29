@@ -16,8 +16,8 @@ type AppAction int
 const (
 	ActionNone AppAction = iota
 	ActionQuit
+	ActionNew
 	ActionClearHistory
-	ActionSwitchToWelcome
 	ActionSetModeQuery
 	ActionSetModeBash
 )
@@ -133,15 +133,6 @@ func (r *CommandRegistry) registerBuiltins() {
 			default:
 				return fmt.Sprintf("Unknown mode: %q. Use 'query' or 'bash'.", args[0]), ActionNone
 			}
-		},
-	})
-
-	// /about
-	r.Register(&Command{
-		Name:        "about",
-		Description: "Show the welcome screen",
-		Handler: func(args []string) (string, AppAction) {
-			return "", ActionSwitchToWelcome
 		},
 	})
 

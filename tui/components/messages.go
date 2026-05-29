@@ -21,6 +21,7 @@ const (
 	MsgSystem
 	MsgError
 	MsgCommand
+	msgRaw // pre-rendered block (e.g. welcome screen)
 	// Future: MsgToolCall, MsgStreaming, MsgImage
 )
 
@@ -78,6 +79,16 @@ func (m *MessagesModel) SetSize(width, height int) {
 			glamour.WithWordWrap(width-4),
 		)
 	}
+	m.refresh()
+}
+
+// AddRaw appends a pre-rendered string block directly to the viewport content
+// without wrapping it in a message struct. Used for the welcome block.
+func (m *MessagesModel) AddRaw(content string) {
+	m.messages = append(m.messages, Message{
+		Type:    msgRaw,
+		Content: content,
+	})
 	m.refresh()
 }
 
@@ -206,6 +217,9 @@ func (m *MessagesModel) renderMessage(msg Message) string {
 	case MsgCommand:
 		prefix := tui.StyleCommand.Render("⌘")
 		return prefix + " " + tui.StyleAccentPurple.Render(msg.Content) + "\n"
+
+	case msgRaw:
+		return msg.Content
 
 	default:
 		return msg.Content + "\n"
