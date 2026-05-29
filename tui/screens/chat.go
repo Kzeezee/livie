@@ -209,12 +209,6 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 	m.mode = mode
 	m.hud.Mode = mode
 	m.input.SetMode(mode)
-	switch mode {
-	case components.ModeBash:
-		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "switched to BASH mode"))
-	default:
-		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "switched to CHAT mode"))
-	}
 	m.messages.GotoBottom()
 }
 
