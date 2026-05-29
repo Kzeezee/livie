@@ -4,11 +4,14 @@ import "charm.land/bubbles/v2/key"
 
 // KeyMap holds all keybindings for the application.
 type KeyMap struct {
-	ToggleMode key.Binding
-	Submit     key.Binding
-	ClearInput key.Binding
-	Quit       key.Binding
-	Escape     key.Binding
+	ToggleMode         key.Binding
+	Submit             key.Binding
+	ClearInput         key.Binding
+	Quit               key.Binding
+	Escape             key.Binding
+	AutocompleteAccept key.Binding
+	AutocompleteUp     key.Binding
+	AutocompleteDown   key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings.
@@ -33,6 +36,18 @@ func DefaultKeyMap() KeyMap {
 		Escape: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "cancel / chat mode"),
+		),
+		AutocompleteAccept: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "accept suggestion"),
+		),
+		AutocompleteUp: key.NewBinding(
+			key.WithKeys("up"),
+			key.WithHelp("↑", "suggestion up"),
+		),
+		AutocompleteDown: key.NewBinding(
+			key.WithKeys("down"),
+			key.WithHelp("↓", "suggestion down"),
 		),
 	}
 }

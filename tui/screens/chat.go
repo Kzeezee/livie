@@ -21,16 +21,17 @@ type ChatModel struct {
 	keys     tui.KeyMap
 	registry *tui.CommandRegistry
 
-	hud      components.HUDState
-	messages components.MessagesModel
-	input    components.InputModel
+	hud          components.HUDState
+	messages     components.MessagesModel
+	input        components.InputModel
+	autocomplete components.AutocompleteModel
 
 	width  int
 	height int
 
 	mode        components.InputMode
 	quitFirst   bool
-	quitFirstAt  time.Time
+	quitFirstAt time.Time
 }
 
 const (
@@ -40,18 +41,19 @@ const (
 
 func NewChatModel(cfg *config.Config, width, height int) ChatModel {
 	inputModel := components.NewInputModel(width)
-	vpH := viewportH(height, inputModel.Height())
+	vpH := viewportH(height, inputModel.Height(), 0)
 
 	m := ChatModel{
-		cfg:      cfg,
-		keys:     tui.DefaultKeyMap(),
-		registry: tui.NewCommandRegistry(),
-		hud:      components.DefaultHUDState(),
-		messages: components.NewMessagesModel(width, vpH),
-		input:    inputModel,
-		width:    width,
-		height:   height,
-		mode:     components.ModeChat,
+		cfg:          cfg,
+		keys:         tui.DefaultKeyMap(),
+		registry:     tui.NewCommandRegistry(),
+		hud:          components.DefaultHUDState(),
+		messages:     components.NewMessagesModel(width, vpH),
+		input:        inputModel,
+		autocomplete: components.NewAutocompleteModel(width),
+		width:        width,
+		height:       height,
+		mode:         components.ModeChat,
 	}
 
 	m.registry.Register(newCmd(m))
@@ -114,6 +116,31 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 }
 
 func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
+	// ── Autocomplete navigation — intercepted before anything else ───────────
+	if m.autocomplete.IsVisible() {
+		switch {
+		case key.Matches(msg, m.keys.AutocompleteDown):
+			m.autocomplete.MoveDown()
+			return true, nil
+
+		case key.Matches(msg, m.keys.AutocompleteUp):
+			m.autocomplete.MoveUp()
+			return true, nil
+
+		case key.Matches(msg, m.keys.AutocompleteAccept):
+			if sel := m.autocomplete.Selected(); sel != nil {
+				m.input.SetValue("/" + sel.Name + " ")
+				// Sync immediately so Height() is correct before syncInputHeight
+				m.autocomplete.SetInput(m.input.Value(), m.registry)
+			}
+			return true, nil
+
+		case key.Matches(msg, m.keys.Escape):
+			m.autocomplete.Dismiss()
+			return true, nil
+		}
+	}
+
 	switch {
 	// ctrl+j always works. shift+enter only fires on Kitty-protocol terminals;
 	// on standard terminals it is indistinguishable from plain enter.
@@ -191,7 +218,7 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 		return tea.Quit
 
 	case tui.ActionNew:
-		vpH := viewportH(m.height, m.input.Height())
+		vpH := viewportH(m.height, m.input.Height(), 0)
 		m.messages = components.NewMessagesModel(m.width, vpH)
 		m.showWelcome()
 
@@ -212,14 +239,18 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 	m.messages.GotoBottom()
 }
 
-// syncInputHeight resizes the messages viewport whenever the input box height changes.
+// syncInputHeight resizes the messages viewport to account for current input
+// and autocomplete heights. Also keeps autocomplete state in sync with input.
 func (m *ChatModel) syncInputHeight() {
-	m.messages.SetSize(m.width, viewportH(m.height, m.input.Height()))
+	m.autocomplete.SetInput(m.input.Value(), m.registry)
+	m.messages.SetSize(m.width, viewportH(m.height, m.input.Height(), m.autocomplete.Height()))
 }
 
 func (m *ChatModel) relayout() {
 	m.input.SetWidth(m.width)
-	vpH := viewportH(m.height, m.input.Height())
+	m.autocomplete.SetWidth(m.width)
+	m.autocomplete.SetInput(m.input.Value(), m.registry)
+	vpH := viewportH(m.height, m.input.Height(), m.autocomplete.Height())
 	m.messages.SetSize(m.width, vpH)
 }
 
@@ -229,14 +260,17 @@ func (m ChatModel) View() tea.View {
 		Foreground(lipgloss.Color(tui.ColBorder)).
 		Render(strings.Repeat("─", m.width))
 
-	content := lipgloss.JoinVertical(
-		lipgloss.Left,
+	parts := []string{
 		m.messages.View(),
 		divider,
 		m.input.View(),
-		divider,
-		hud,
-	)
+	}
+	if m.autocomplete.IsVisible() {
+		parts = append(parts, m.autocomplete.View())
+	}
+	parts = append(parts, divider, hud)
+
+	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	v := tea.NewView(content)
 	v.AltScreen = true
 	return v
@@ -264,11 +298,12 @@ type TransitionToWelcome struct{}
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 // ViewportH returns the height available for the messages viewport given the
-// total terminal height and the current input box height.
-func ViewportH(totalH, inputH int) int { return viewportH(totalH, inputH) }
+// total terminal height and current input box height (autocomplete = 0).
+// Used by tests; production code calls viewportH directly with all three args.
+func ViewportH(totalH, inputH int) int { return viewportH(totalH, inputH, 0) }
 
-func viewportH(totalH, inputH int) int {
-	h := totalH - hudHeight - divHeight - inputH
+func viewportH(totalH, inputH, autocompleteH int) int {
+	h := totalH - hudHeight - divHeight - inputH - autocompleteH
 	if h < 1 {
 		h = 1
 	}

@@ -74,6 +74,26 @@ func (r *CommandRegistry) Dispatch(input string) (string, AppAction) {
 	return cmd.Handler(args)
 }
 
+// Suggest returns all commands (in registration order) whose Name or any
+// Alias has prefix as a case-insensitive prefix. No cap — callers window.
+func (r *CommandRegistry) Suggest(prefix string) []*Command {
+	prefix = strings.ToLower(prefix)
+	var out []*Command
+	for _, cmd := range r.ordered {
+		if prefix == "" || strings.HasPrefix(cmd.Name, prefix) {
+			out = append(out, cmd)
+			continue
+		}
+		for _, alias := range cmd.Aliases {
+			if strings.HasPrefix(alias, prefix) {
+				out = append(out, cmd)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // HelpText returns a formatted list of all commands.
 func (r *CommandRegistry) HelpText() string {
 	var sb strings.Builder
