@@ -489,6 +489,7 @@ func (m SetupModel) initRemoteInputs() SetupModel {
 
 	m.remoteInputs[1] = newInput(60)
 	m.remoteInputs[1].EchoMode = textinput.EchoPassword
+	m.remoteInputs[1].EchoCharacter = '•'
 	m.remoteInputs[1].SetValue(active.APIKey)
 	m.remoteInputs[1].Placeholder = "sk-..."
 
@@ -750,7 +751,37 @@ func (m SetupModel) renderInstallError() string {
 	hint := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextMuted)).
 		Render("enter to confirm · esc to go back")
 	return lipgloss.JoinVertical(lipgloss.Left,
-		heading, errText, renderMenu(choices, m.installChoice), "", hint)
+		heading, errText, renderMenu(choices, m.installChoice), "", hint, "",
+		renderManualInstallNote())
+}
+
+// renderManualInstallNote renders a compact tip shown on the error screen,
+// telling the user where to grab a binary and where to drop it.
+func renderManualInstallNote() string {
+	muted := func(s string) string {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextMuted)).Render(s)
+	}
+	accent := func(s string) string {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentCyan)).Render(s)
+	}
+
+	labelW := 14
+	urlLabel := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextSecondary)).
+		Width(labelW).Render("download from")
+	pathLabel := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextSecondary)).
+		Width(labelW).Render("drop binary at")
+
+	urlVal := accent("github.com/ggerganov/llama.cpp/releases")
+	pathVal := accent(runner.DataDirBinaryPath())
+
+	rule := muted(strings.Repeat("┄", 52))
+	title := muted("or install manually")
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.JoinHorizontal(lipgloss.Top, rule, "  ", title),
+		urlLabel+"  "+urlVal,
+		pathLabel+"  "+pathVal,
+	)
 }
 
 func (m SetupModel) renderModeSelect() string {

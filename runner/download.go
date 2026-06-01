@@ -1,7 +1,9 @@
 package runner
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -69,8 +71,12 @@ func downloadAndExtract(ctx context.Context, platform Platform, destDir string, 
 		return "", fmt.Errorf("resolve release asset: %w", err)
 	}
 
-	// 2. Stream the ZIP to a temp file, emitting progress updates.
-	tmpFile, err := os.CreateTemp("", "livie-llama-*.zip")
+	// 2. Stream the archive to a temp file, emitting progress updates.
+	tmpExt := ".zip"
+	if strings.HasSuffix(url, ".tar.gz") {
+		tmpExt = ".tar.gz"
+	}
+	tmpFile, err := os.CreateTemp("", "livie-llama-*"+tmpExt)
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
@@ -88,7 +94,7 @@ func downloadAndExtract(ctx context.Context, platform Platform, destDir string, 
 		return "", fmt.Errorf("mkdir %s: %w", destDir, err)
 	}
 
-	binaryPath, err := extractBinary(tmpPath, platform, destDir)
+	binaryPath, err := extractBinary(tmpPath, url, platform, destDir)
 	if err != nil {
 		return "", fmt.Errorf("extract binary: %w", err)
 	}
@@ -189,9 +195,18 @@ func downloadToFile(ctx context.Context, url string, totalSize int64, f *os.File
 	return nil
 }
 
-// extractBinary opens the ZIP at zipPath, finds the llama-server binary by name,
-// extracts it to destDir, and sets executable permissions.
-func extractBinary(zipPath string, platform Platform, destDir string) (string, error) {
+// extractBinary opens the archive at archivePath (ZIP or tar.gz, detected from
+// the original download url), finds the llama-server binary by name, extracts
+// it to destDir, and sets executable permissions.
+func extractBinary(archivePath, url string, platform Platform, destDir string) (string, error) {
+	if strings.HasSuffix(url, ".tar.gz") {
+		return extractBinaryTarGz(archivePath, platform, destDir)
+	}
+	return extractBinaryZip(archivePath, platform, destDir)
+}
+
+// extractBinaryZip extracts the llama-server binary from a ZIP archive.
+func extractBinaryZip(zipPath string, platform Platform, destDir string) (string, error) {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return "", fmt.Errorf("open zip: %w", err)
@@ -232,4 +247,58 @@ func extractBinary(zipPath string, platform Platform, destDir string) (string, e
 	}
 
 	return "", fmt.Errorf("binary %q not found in ZIP", binaryName)
+}
+
+// extractBinaryTarGz extracts the llama-server binary from a .tar.gz archive.
+func extractBinaryTarGz(archivePath string, platform Platform, destDir string) (string, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("open tar.gz: %w", err)
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return "", fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	binaryName := platform.BinaryName()
+
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("read tar: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		if filepath.Base(hdr.Name) != binaryName {
+			continue
+		}
+
+		destPath := filepath.Join(destDir, binaryName)
+		out, err := os.Create(destPath)
+		if err != nil {
+			return "", fmt.Errorf("create %s: %w", destPath, err)
+		}
+
+		if _, err := io.Copy(out, tr); err != nil {
+			out.Close()
+			os.Remove(destPath)
+			return "", fmt.Errorf("write %s: %w", destPath, err)
+		}
+		out.Close()
+
+		if err := os.Chmod(destPath, 0o755); err != nil {
+			return "", fmt.Errorf("chmod %s: %w", destPath, err)
+		}
+		return destPath, nil
+	}
+
+	return "", fmt.Errorf("binary %q not found in tar.gz", binaryName)
 }

@@ -95,34 +95,42 @@ func DetectAvailable() []GPUBackend {
 }
 
 // ReleaseAssetSuffix returns the filename suffix used to select the correct
-// llama.cpp GitHub release ZIP for this platform.
+// llama.cpp GitHub release archive for this platform.
+//
+// Asset naming as of b9452+:
+//   - Linux/macOS: llama-<tag>-bin-<os>-<variant>-<arch>.tar.gz
+//   - Windows:     llama-<tag>-bin-win-<variant>-<arch>.zip
 func (p Platform) ReleaseAssetSuffix() string {
 	switch p.OS {
 	case "darwin":
 		if p.Arch == "arm64" {
-			return "macos-arm64.zip"
+			return "bin-macos-arm64.tar.gz"
 		}
-		return "macos-x64.zip"
+		return "bin-macos-x64.tar.gz"
 	case "windows":
 		switch p.GPU {
 		case GPUBackendCUDA:
-			return "win-cuda-cu12.2.0-x64.zip"
+			// Prefer CUDA 12 build; falls back gracefully if not found.
+			return "bin-win-cuda-12.4-x64.zip"
 		case GPUBackendVulkan:
-			return "win-vulkan-x64.zip"
+			return "bin-win-vulkan-x64.zip"
 		default:
-			return "win-x64.zip"
+			if p.Arch == "arm64" {
+				return "bin-win-cpu-arm64.zip"
+			}
+			return "bin-win-cpu-x64.zip"
 		}
 	default: // linux
 		if p.Arch == "arm64" {
-			return "linux-arm64.zip"
+			return "bin-ubuntu-arm64.tar.gz"
 		}
 		switch p.GPU {
-		case GPUBackendCUDA:
-			return "linux-cuda-cu12.2.0-x64.zip"
 		case GPUBackendVulkan:
-			return "linux-vulkan-x64.zip"
+			return "bin-ubuntu-vulkan-x64.tar.gz"
 		default:
-			return "ubuntu-x64.zip"
+			// No separate CUDA linux build is published; the standard x64
+			// build supports CPU inference and is the best available fallback.
+			return "bin-ubuntu-x64.tar.gz"
 		}
 	}
 }
