@@ -39,6 +39,8 @@ type Manager struct {
 // NewManager creates a Manager. The binary is not started until StartCmd() is called.
 // Binary detection (PATH lookup + data-dir check) is performed eagerly here,
 // outside any lock, so computeStateLocked stays I/O-free.
+// If a llama-server is already healthy on the configured port it is adopted
+// immediately so the HUD reflects the real state from the first frame.
 func NewManager(cfg config.RunnerConfig) *Manager {
 	m := &Manager{
 		cfg:      cfg,
@@ -49,6 +51,10 @@ func NewManager(cfg config.RunnerConfig) *Manager {
 		m.binPath = p
 	}
 	m.state = m.computeStateLocked()
+	// Adopt an already-running server (e.g. left over from a previous session).
+	if ok, _ := m.healthCheck(); ok {
+		m.markRunningLocked()
+	}
 	return m
 }
 
@@ -145,6 +151,12 @@ func (m *Manager) StartCmd() tea.Cmd {
 	}
 }
 
+// Stop synchronously stops the running process. Intended for use during
+// application shutdown where a tea.Cmd cannot be returned.
+func (m *Manager) Stop() error {
+	return m.stop()
+}
+
 // StopCmd stops the running process and returns a RunnerStoppedMsg.
 func (m *Manager) StopCmd() tea.Cmd {
 	return func() tea.Msg {
@@ -174,6 +186,9 @@ func (m *Manager) PollUntilReadyCmd(timeout time.Duration) tea.Cmd {
 	return func() tea.Msg {
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
+			if m.procExitedWithError() {
+				return RunnerStartedMsg{Err: fmt.Errorf("process exited unexpectedly")}
+			}
 			if ok, _ := m.healthCheck(); ok {
 				m.mu.Lock()
 				m.markRunningLocked()
@@ -219,6 +234,9 @@ func (m *Manager) RestartCmd(timeout time.Duration) tea.Cmd {
 		}
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
+			if m.procExitedWithError() {
+				return RunnerStartedMsg{Err: fmt.Errorf("process exited unexpectedly")}
+			}
 			if ok, _ := m.healthCheck(); ok {
 				m.mu.Lock()
 				m.markRunningLocked()
@@ -236,11 +254,21 @@ func (m *Manager) RestartCmd(timeout time.Duration) tea.Cmd {
 // stepStartingRunner entry.
 func (m *Manager) StartAndPollCmd(timeout time.Duration) tea.Cmd {
 	return func() tea.Msg {
+		// Adopt an already-healthy server rather than trying to bind the same port.
+		if ok, _ := m.healthCheck(); ok {
+			m.mu.Lock()
+			m.markRunningLocked()
+			m.mu.Unlock()
+			return RunnerStartedMsg{}
+		}
 		if err := m.start(); err != nil {
 			return RunnerStartedMsg{Err: err}
 		}
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
+			if m.procExitedWithError() {
+				return RunnerStartedMsg{Err: fmt.Errorf("process exited unexpectedly")}
+			}
 			if ok, _ := m.healthCheck(); ok {
 				m.mu.Lock()
 				m.markRunningLocked()
@@ -349,6 +377,18 @@ func (m *Manager) markRunningLocked() {
 	}
 }
 
+// procExitedWithError returns true if the managed process has exited with a
+// non-zero status. Safe for concurrent use; does not require m.mu.
+func (m *Manager) procExitedWithError() bool {
+	m.mu.Lock()
+	proc := m.proc
+	m.mu.Unlock()
+	if proc == nil {
+		return false
+	}
+	return proc.State() == ProcessError
+}
+
 // computeStateLocked returns the appropriate initial state based on currently
 // cached fields. Does not perform any I/O. Caller must hold m.mu.
 func (m *Manager) computeStateLocked() ManagerState {
@@ -387,14 +427,14 @@ func buildArgs(cfg config.RunnerConfig) []string {
 		"--ctx-size", fmt.Sprintf("%d", cfg.ContextSize),
 		"--host", "127.0.0.1",
 	}
-	if cfg.GPULayers != 0 {
+	if cfg.GPULayers > 0 {
 		args = append(args, "--n-gpu-layers", fmt.Sprintf("%d", cfg.GPULayers))
 	}
 	if cfg.Threads != 0 {
 		args = append(args, "--threads", fmt.Sprintf("%d", cfg.Threads))
 	}
 	if cfg.FlashAttn {
-		args = append(args, "--flash-attn")
+		args = append(args, "--flash-attn", "on")
 	}
 	if !cfg.Verbose {
 		args = append(args, "--log-disable")

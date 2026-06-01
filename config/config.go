@@ -84,7 +84,7 @@ func DefaultConfig() *Config {
 			ModelPath:   scanForModel(),
 			GPUBackend:  "cpu",
 			Port:        8080,
-			GPULayers:   -1,
+			GPULayers:   0,
 			ContextSize: 16384,
 			Threads:     0,
 			FlashAttn:   true,

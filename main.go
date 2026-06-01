@@ -25,4 +25,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "livie: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Shut down the local runner on exit so llama-server doesn't outlive the app.
+	_ = mgr.Stop()
 }

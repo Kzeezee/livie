@@ -33,11 +33,21 @@ const (
 	ActionRunnerRestart // handled by ChatModel.handleAction
 )
 
+// SubArg describes a named sub-argument for a /command (e.g. "start" for /run).
+// SubArgs may nest arbitrarily: each SubArg can itself carry further SubArgs,
+// enabling multi-level completions (e.g. /run start --gpu).
+type SubArg struct {
+	Name        string
+	Description string
+	SubArgs     []SubArg // next-level completions, if any
+}
+
 // Command describes a registered /command.
 type Command struct {
 	Name        string
 	Aliases     []string
 	Description string
+	Subcommands []SubArg // optional sub-arguments shown in autocomplete
 	Handler     CommandHandler
 }
 
@@ -85,6 +95,11 @@ func (r *CommandRegistry) Dispatch(input string) (string, AppAction) {
 		return fmt.Sprintf("Unknown command: /%s\nType /help for a list of commands.", name), ActionNone
 	}
 	return cmd.Handler(args)
+}
+
+// FindCommand returns the Command registered under name (or nil).
+func (r *CommandRegistry) FindCommand(name string) *Command {
+	return r.commands[strings.ToLower(name)]
 }
 
 // Suggest returns all commands (in registration order) whose Name or any
@@ -171,6 +186,13 @@ func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manag
 	r.Register(&Command{
 		Name:        "run",
 		Description: "Manage the local llama-server runner",
+		Subcommands: []SubArg{
+			{Name: "status", Description: "Show runner state, binary path, and uptime (default)"},
+			{Name: "start", Description: "Start the llama-server process"},
+			{Name: "stop", Description: "Stop the llama-server process"},
+			{Name: "restart", Description: "Restart the llama-server process"},
+			{Name: "log", Description: "Show the last 20 lines of runner output"},
+		},
 		Handler: func(args []string) (string, AppAction) {
 			sub := "status"
 			if len(args) > 0 {
@@ -200,6 +222,9 @@ func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manag
 	r.Register(&Command{
 		Name:        "model",
 		Description: "Show or switch the active model file",
+		Subcommands: []SubArg{
+			{Name: "<path>", Description: "Path to a .gguf file or directory containing one"},
+		},
 		Handler: func(args []string) (string, AppAction) {
 			if len(args) == 0 {
 				return modelStatus(cfg), ActionNone
@@ -223,6 +248,10 @@ func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manag
 	r.Register(&Command{
 		Name:        "endpoint",
 		Description: "Show or switch the active API endpoint",
+		Subcommands: []SubArg{
+			{Name: "list", Description: "List all configured endpoints"},
+			{Name: "<name>", Description: "Switch to a named endpoint (e.g. local, openai)"},
+		},
 		Handler: func(args []string) (string, AppAction) {
 			if len(args) == 0 {
 				return endpointStatus(cfg), ActionNone

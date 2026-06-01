@@ -132,10 +132,11 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 	case runner.RunnerStartedMsg:
 		m.syncHUDRunnerState()
 		if msg.Err != nil {
-			m.messages.AddMessage(components.NewMessage(
-				components.MsgSystem,
-				fmt.Sprintf("runner failed to start: %s", msg.Err),
-			))
+			errText := fmt.Sprintf("runner failed to start: %s", msg.Err)
+			if lines := m.runner.LogLines(20); len(lines) > 0 {
+				errText += "\n\n```\n" + strings.Join(lines, "\n") + "\n```"
+			}
+			m.messages.AddMessage(components.NewMessage(components.MsgSystem, errText))
 		} else {
 			m.messages.AddMessage(components.NewMessage(
 				components.MsgSystem, "runner started",
@@ -186,9 +187,15 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 			return true, nil
 
 		case key.Matches(msg, m.keys.AutocompleteAccept):
-			if sel := m.autocomplete.Selected(); sel != nil {
+			if m.autocomplete.InSubMode() {
+				if sub := m.autocomplete.SelectedSub(); sub != nil {
+					// Prepend the already-typed prefix (e.g. "/run ") and append
+					// a trailing space so the next level's subs can appear.
+					m.input.SetValue(m.autocomplete.SubInputPrefix() + sub.Name + " ")
+					m.autocomplete.SetInput(m.input.Value(), m.registry)
+				}
+			} else if sel := m.autocomplete.Selected(); sel != nil {
 				m.input.SetValue("/" + sel.Name + " ")
-				// Sync immediately so Height() is correct before syncInputHeight
 				m.autocomplete.SetInput(m.input.Value(), m.registry)
 			}
 			return true, nil
