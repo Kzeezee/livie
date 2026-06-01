@@ -81,6 +81,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.chat.Init()
 	}
 
+	// ── Global quit ────────────────────────────────────────────────────────────
+	if k, ok := msg.(tea.KeyPressMsg); ok && k.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+
 	// ── Propagate resize to all screens ─────────────────────────────────────
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width = ws.Width
