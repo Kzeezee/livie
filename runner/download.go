@@ -9,92 +9,95 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 )
 
 const githubLatestRelease = "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest"
 
-// ProgressUpdate is emitted by the download goroutine on each chunk received
-// and once more when extraction completes (Done=true).
+// ProgressUpdate is emitted by the download goroutine on each chunk received,
+// and once more as the final message when extraction completes (Done=true).
 type ProgressUpdate struct {
 	Downloaded int64  // bytes received so far
-	Total      int64  // total size; 0 = unknown (no Content-Length)
-	Done       bool   // true on the final update
-	Err        error  // non-nil only on the final update when something went wrong
-	BinaryPath string // populated on successful completion (Done && Err == nil)
+	Total      int64  // total bytes; 0 = unknown (no Content-Length)
+	Done       bool   // true on the final message only
+	Err        error  // set on the final message when something went wrong
+	BinaryPath string // set on the final message when Done && Err == nil
 }
 
-// StartDownload launches the download goroutine and returns a channel of
-// ProgressUpdate values. Call DownloadProgressCmd to drain the channel in a
-// Bubbletea-friendly way.
+// StartDownload launches the download goroutine and returns a read-only channel
+// of ProgressUpdate values. Drain it with DownloadProgressCmd.
 //
-// ctx can be cancelled to abort the download; cancellation is reported as an
-// error on the final ProgressUpdate.
+// ctx can be cancelled to abort the download; the cancellation error is
+// delivered on the final ProgressUpdate (Done=true, Err=ctx.Err()).
+//
+// The channel is closed after the final message is sent.
 func StartDownload(ctx context.Context, platform Platform, destDir string) <-chan ProgressUpdate {
 	ch := make(chan ProgressUpdate, 4)
 	go func() {
 		defer close(ch)
-		if err := downloadAndExtract(ctx, platform, destDir, ch); err != nil {
-			ch <- ProgressUpdate{Done: true, Err: err}
-		}
+		binaryPath, err := downloadAndExtract(ctx, platform, destDir, ch)
+		// The goroutine wrapper is the single sender of the final Done message.
+		ch <- ProgressUpdate{Done: true, Err: err, BinaryPath: binaryPath}
 	}()
 	return ch
 }
 
-// DownloadProgressCmd returns a tea.Cmd that blocks until the next
-// ProgressUpdate is available on ch, then wraps it as a DownloadProgressMsg.
-// Re-issue this cmd for every non-Done update.
+// DownloadProgressCmd returns a tea.Cmd that blocks until the next ProgressUpdate
+// arrives on ch, then returns it as a DownloadProgressMsg.
+//
+// Re-issue this cmd after each message where Done == false.
+// When the channel is closed (after Done == true), the zero-value ProgressUpdate
+// is returned, which the caller should treat as terminal.
 func DownloadProgressCmd(ch <-chan ProgressUpdate) tea.Cmd {
 	return func() tea.Msg {
 		return DownloadProgressMsg(<-ch)
 	}
 }
 
-// downloadAndExtract performs the full download + extraction pipeline,
-// writing progress updates to ch.
-func downloadAndExtract(ctx context.Context, platform Platform, destDir string, ch chan<- ProgressUpdate) error {
-	// 1. Resolve the download URL from the GitHub API.
-	url, size, err := resolveAssetURL(ctx, platform)
+// downloadAndExtract performs the full pipeline: GitHub API lookup → streaming
+// download to temp file → ZIP extraction. Progress updates are written to ch.
+//
+// Returns the path to the extracted binary on success.
+// The final Done=true ProgressUpdate is NOT sent here — the caller (StartDownload)
+// sends it so there is exactly one sender of the terminal message.
+func downloadAndExtract(ctx context.Context, platform Platform, destDir string, ch chan<- ProgressUpdate) (string, error) {
+	// 1. Resolve the download URL from the GitHub Releases API.
+	url, totalSize, err := resolveAssetURL(ctx, platform)
 	if err != nil {
-		return fmt.Errorf("resolve release asset: %w", err)
+		return "", fmt.Errorf("resolve release asset: %w", err)
 	}
 
-	// 2. Download the ZIP to a temp file with streaming progress.
+	// 2. Stream the ZIP to a temp file, emitting progress updates.
 	tmpFile, err := os.CreateTemp("", "livie-llama-*.zip")
 	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+		return "", fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	if err := downloadToFile(ctx, url, size, tmpFile, ch); err != nil {
+	if err := downloadToFile(ctx, url, totalSize, tmpFile, ch); err != nil {
 		tmpFile.Close()
-		return err
+		return "", err
 	}
 	tmpFile.Close()
 
-	// 3. Extract the binary.
+	// 3. Extract the binary from the ZIP.
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return fmt.Errorf("mkdir destDir: %w", err)
+		return "", fmt.Errorf("mkdir %s: %w", destDir, err)
 	}
 
 	binaryPath, err := extractBinary(tmpPath, platform, destDir)
 	if err != nil {
-		return fmt.Errorf("extract binary: %w", err)
+		return "", fmt.Errorf("extract binary: %w", err)
 	}
 
-	ch <- ProgressUpdate{
-		Downloaded: size,
-		Total:      size,
-		Done:       true,
-		BinaryPath: binaryPath,
-	}
-	return nil
+	return binaryPath, nil
 }
 
-// resolveAssetURL calls the GitHub Releases API and returns the download URL
-// and byte size of the ZIP matching platform.ReleaseAssetSuffix().
+// resolveAssetURL calls the GitHub Releases API and returns the browser download
+// URL and byte size of the ZIP asset matching platform.ReleaseAssetSuffix().
 func resolveAssetURL(ctx context.Context, platform Platform) (url string, size int64, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubLatestRelease, nil)
 	if err != nil {
@@ -125,14 +128,20 @@ func resolveAssetURL(ctx context.Context, platform Platform) (url string, size i
 
 	suffix := platform.ReleaseAssetSuffix()
 	for _, a := range release.Assets {
-		if len(a.Name) >= len(suffix) && a.Name[len(a.Name)-len(suffix):] == suffix {
+		if strings.HasSuffix(a.Name, suffix) {
 			return a.BrowserDownloadURL, a.Size, nil
 		}
 	}
-	return "", 0, fmt.Errorf("no release asset matching suffix %q", suffix)
+	return "", 0, fmt.Errorf("no release asset with suffix %q", suffix)
 }
 
-// downloadToFile streams url into f, emitting ProgressUpdate values to ch.
+// downloadToFile streams url into f, writing non-blocking ProgressUpdates to ch.
+//
+// Progress updates are sent with a non-blocking select: if the channel's 4-slot
+// buffer is full (consumer is behind), the update is dropped. The consumer
+// (DownloadProgressCmd) processes one update per tea.Cmd cycle, so at most a
+// few updates per second may be skipped under heavy traffic. This does not
+// affect correctness — the final Done message is sent unconditionally.
 func downloadToFile(ctx context.Context, url string, totalSize int64, f *os.File, ch chan<- ProgressUpdate) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -165,7 +174,6 @@ func downloadToFile(ctx context.Context, url string, totalSize int64, f *os.File
 				return fmt.Errorf("write temp file: %w", err)
 			}
 			downloaded += int64(n)
-			// Non-blocking send; drop update if consumer is slow.
 			select {
 			case ch <- ProgressUpdate{Downloaded: downloaded, Total: totalSize}:
 			default:
@@ -181,8 +189,8 @@ func downloadToFile(ctx context.Context, url string, totalSize int64, f *os.File
 	return nil
 }
 
-// extractBinary opens the ZIP at zipPath, finds the llama-server binary, and
-// extracts it to destDir with executable permissions.
+// extractBinary opens the ZIP at zipPath, finds the llama-server binary by name,
+// extracts it to destDir, and sets executable permissions.
 func extractBinary(zipPath string, platform Platform, destDir string) (string, error) {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -205,23 +213,23 @@ func extractBinary(zipPath string, platform Platform, destDir string) (string, e
 		out, err := os.Create(destPath)
 		if err != nil {
 			rc.Close()
-			return "", fmt.Errorf("create binary file: %w", err)
+			return "", fmt.Errorf("create %s: %w", destPath, err)
 		}
 
 		if _, err := io.Copy(out, rc); err != nil {
 			out.Close()
 			rc.Close()
 			os.Remove(destPath)
-			return "", fmt.Errorf("extract binary: %w", err)
+			return "", fmt.Errorf("write %s: %w", destPath, err)
 		}
 		out.Close()
 		rc.Close()
 
 		if err := os.Chmod(destPath, 0o755); err != nil {
-			return "", fmt.Errorf("chmod binary: %w", err)
+			return "", fmt.Errorf("chmod %s: %w", destPath, err)
 		}
 		return destPath, nil
 	}
 
-	return "", fmt.Errorf("binary %q not found in ZIP archive", binaryName)
+	return "", fmt.Errorf("binary %q not found in ZIP", binaryName)
 }

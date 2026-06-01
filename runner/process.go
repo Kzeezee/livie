@@ -15,21 +15,23 @@ type ProcessState int
 
 const (
 	ProcessIdle     ProcessState = iota // not yet started
-	ProcessStarting                     // exec.Cmd created, Start() called
-	ProcessRunning                      // process is alive (health check is separate)
-	ProcessStopped                      // cleanly stopped
+	ProcessStarting                     // Start() called, health not yet confirmed
+	ProcessRunning                      // health check passing
+	ProcessStopped                      // cleanly stopped (or stopped by user)
 	ProcessError                        // exited with non-zero code or failed to start
 )
 
 const ringBufCap = 500
 
-// ringBuf is a fixed-capacity circular line buffer.
+// ── ring buffer ───────────────────────────────────────────────────────────
+
+// ringBuf is a fixed-capacity circular line buffer. Safe for concurrent use.
 type ringBuf struct {
 	mu    sync.Mutex
 	lines []string
 	cap   int
-	head  int // index of next write position
-	size  int // number of lines stored
+	head  int // index of the next write slot
+	size  int // number of lines currently stored
 }
 
 func newRingBuf(capacity int) *ringBuf {
@@ -57,7 +59,6 @@ func (r *ringBuf) last(n int) []string {
 		n = r.size
 	}
 	out := make([]string, n)
-	// oldest relevant index
 	start := (r.head - n + r.cap) % r.cap
 	for i := 0; i < n; i++ {
 		out[i] = r.lines[(start+i)%r.cap]
@@ -65,16 +66,20 @@ func (r *ringBuf) last(n int) []string {
 	return out
 }
 
+// ── Process ───────────────────────────────────────────────────────────────
+
 // Process manages a single llama-server subprocess.
 type Process struct {
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	state  ProcessState
-	log    *ringBuf
-	cancel func() // kills the process on demand
+	mu            sync.Mutex
+	cmd           *exec.Cmd
+	state         ProcessState
+	log           *ringBuf
+	done          chan struct{} // closed by the wait goroutine once the process exits
+	stoppedByUser bool         // set by Stop() before sending SIGTERM
 }
 
-// NewProcess creates a Process configured to run binPath with args.
+// NewProcess creates a Process ready to run binPath with args.
+// Call Start() to launch it.
 func NewProcess(binPath string, args []string) *Process {
 	return &Process{
 		state: ProcessIdle,
@@ -83,7 +88,8 @@ func NewProcess(binPath string, args []string) *Process {
 	}
 }
 
-// Start launches the process and begins capturing its output.
+// Start launches the subprocess and begins capturing its output into the ring buffer.
+// Safe to call only once; subsequent calls while running are no-ops.
 func (p *Process) Start() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -92,7 +98,6 @@ func (p *Process) Start() error {
 		return nil
 	}
 
-	// Fresh pipes for stdout and stderr.
 	stdout, err := p.cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -102,32 +107,39 @@ func (p *Process) Start() error {
 		return err
 	}
 
+	// Allocate the done channel before Start() so Stop() can safely read it.
+	p.done = make(chan struct{})
+
 	if err := p.cmd.Start(); err != nil {
 		p.state = ProcessError
+		close(p.done) // unblock any concurrent Stop() call
 		return err
 	}
 	p.state = ProcessStarting
 
-	// Goroutines to drain stdout and stderr into the ring buffer.
 	go p.captureLines(stdout)
 	go p.captureLines(stderr)
 
-	// Goroutine to update state when the process exits.
+	// Wait goroutine: sets final state and signals done.
 	go func() {
 		_ = p.cmd.Wait()
+
 		p.mu.Lock()
-		p.state = ProcessStopped
-		if p.cmd.ProcessState != nil && !p.cmd.ProcessState.Success() {
+		if p.stoppedByUser || (p.cmd.ProcessState != nil && p.cmd.ProcessState.Success()) {
+			p.state = ProcessStopped
+		} else {
 			p.state = ProcessError
 		}
 		p.mu.Unlock()
+
+		close(p.done)
 	}()
 
 	return nil
 }
 
 // MarkRunning transitions the state from ProcessStarting to ProcessRunning.
-// Called by the manager once the health check passes.
+// Called by the Manager once the health check passes.
 func (p *Process) MarkRunning() {
 	p.mu.Lock()
 	if p.state == ProcessStarting {
@@ -136,40 +148,41 @@ func (p *Process) MarkRunning() {
 	p.mu.Unlock()
 }
 
-// Stop sends SIGTERM to the process. If it has not exited within 5 seconds,
-// SIGKILL is sent.
+// Stop sends SIGTERM to the subprocess. If the process has not exited within
+// 5 seconds, SIGKILL is sent. Blocks until the process has fully exited.
+//
+// The wait goroutine — not Stop — owns the final state transition, so there
+// is no double-Wait race.
 func (p *Process) Stop() error {
 	p.mu.Lock()
 	proc := p.cmd.Process
 	state := p.state
+	done := p.done
+	if proc != nil && state != ProcessIdle && state != ProcessStopped {
+		p.stoppedByUser = true
+	}
 	p.mu.Unlock()
 
-	if proc == nil || state == ProcessIdle || state == ProcessStopped {
+	// Nothing to stop.
+	if proc == nil || state == ProcessIdle || state == ProcessStopped || done == nil {
 		return nil
 	}
 
-	// Attempt graceful shutdown.
+	// Graceful shutdown.
 	if err := proc.Signal(syscall.SIGTERM); err != nil {
-		// Process may already have exited.
+		// Process already exited — wait for the done signal anyway.
+		<-done
 		return nil
 	}
-
-	done := make(chan struct{})
-	go func() {
-		_ = p.cmd.Wait()
-		close(done)
-	}()
 
 	select {
 	case <-done:
+		// Process exited cleanly within the grace period.
 	case <-time.After(5 * time.Second):
+		// Force-kill and wait for the goroutine to close done.
 		_ = proc.Signal(syscall.SIGKILL)
 		<-done
 	}
-
-	p.mu.Lock()
-	p.state = ProcessStopped
-	p.mu.Unlock()
 	return nil
 }
 
@@ -185,7 +198,7 @@ func (p *Process) LogLines(n int) []string {
 	return p.log.last(n)
 }
 
-// Pid returns the OS process ID, or 0 if not running.
+// Pid returns the OS process ID, or 0 if the process has not been started.
 func (p *Process) Pid() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -195,16 +208,16 @@ func (p *Process) Pid() int {
 	return p.cmd.Process.Pid
 }
 
+// Env sets additional environment variables on the subprocess.
+// Must be called before Start().
+func (p *Process) Env(extra []string) {
+	p.cmd.Env = append(os.Environ(), extra...)
+}
+
 // captureLines reads lines from r and pushes them into the ring buffer.
 func (p *Process) captureLines(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		p.log.push(scanner.Text())
 	}
-}
-
-// Env sets environment variables on the underlying command.
-// Must be called before Start().
-func (p *Process) Env(env []string) {
-	p.cmd.Env = append(os.Environ(), env...)
 }

@@ -10,14 +10,14 @@ import (
 
 // Config holds all Livie configuration. Populated from TOML via config/toml.go.
 type Config struct {
-	Runner    RunnerConfig    `toml:"runner"`
+	Runner    RunnerConfig     `toml:"runner"`
 	Endpoint  EndpointSelector `toml:"endpoint"`
 	Endpoints []EndpointConfig `toml:"endpoints"`
-	Behaviour BehaviourConfig `toml:"behaviour"`
-	HUD       HUDConfig       `toml:"hud"`
-	Paths     PathsConfig     `toml:"paths"`
+	Behaviour BehaviourConfig  `toml:"behaviour"`
+	HUD       HUDConfig        `toml:"hud"`
+	Paths     PathsConfig      `toml:"paths"`
 
-	// Runtime-only (not written to TOML).
+	// Runtime-only — never written to TOML.
 	IsFirstRun bool   `toml:"-"`
 	ConfigPath string `toml:"-"`
 }
@@ -73,12 +73,12 @@ func DefaultPath() string {
 }
 
 // DefaultConfig returns a Config with sensible defaults.
+// IsFirstRun is always false here; Load() is the sole authority on that flag.
 // It scans ./model/ for any .gguf file and pre-populates Runner.ModelPath.
 func DefaultConfig() *Config {
 	home, _ := os.UserHomeDir()
-	cfgPath := DefaultPath()
 
-	cfg := &Config{
+	return &Config{
 		Runner: RunnerConfig{
 			BinaryPath:  "",
 			ModelPath:   scanForModel(),
@@ -109,11 +109,9 @@ func DefaultConfig() *Config {
 			Skills: filepath.Join(home, ".local", "share", "livie", "skills"),
 			Index:  filepath.Join(home, ".local", "share", "livie", "index"),
 		},
-		IsFirstRun: !configExists(cfgPath),
-		ConfigPath: cfgPath,
+		// IsFirstRun intentionally left false — Load() sets it.
+		// ConfigPath intentionally left empty — Load() sets it.
 	}
-
-	return cfg
 }
 
 // ModelName returns the display name of the active model (basename without path).
@@ -128,9 +126,8 @@ func (c *Config) ModelName() string {
 // ActiveEndpoint returns the EndpointConfig for the currently active endpoint,
 // or a zero-value config if none is found.
 func (c *Config) ActiveEndpoint() EndpointConfig {
-	name := c.Endpoint.Active
 	for _, ep := range c.Endpoints {
-		if ep.Name == name {
+		if ep.Name == c.Endpoint.Active {
 			return ep
 		}
 	}
@@ -140,24 +137,18 @@ func (c *Config) ActiveEndpoint() EndpointConfig {
 // scanForModel looks in ./model/ (relative to working directory) for the first
 // .gguf file and returns its absolute path. Returns "" if none found.
 func scanForModel() string {
-	modelDir := "model"
-	entries, err := os.ReadDir(modelDir)
+	entries, err := os.ReadDir("model")
 	if err != nil {
 		return ""
 	}
 	for _, e := range entries {
 		if !e.IsDir() && filepath.Ext(e.Name()) == ".gguf" {
-			abs, err := filepath.Abs(filepath.Join(modelDir, e.Name()))
+			abs, err := filepath.Abs(filepath.Join("model", e.Name()))
 			if err != nil {
-				return filepath.Join(modelDir, e.Name())
+				return filepath.Join("model", e.Name())
 			}
 			return abs
 		}
 	}
 	return ""
-}
-
-func configExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

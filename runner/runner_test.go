@@ -3,6 +3,8 @@ package runner
 import (
 	"runtime"
 	"testing"
+
+	"github.com/kez/livie/config"
 )
 
 func TestParseBackendRoundTrip(t *testing.T) {
@@ -78,7 +80,7 @@ func TestPlatformBinaryName(t *testing.T) {
 }
 
 func TestDetectNotFound(t *testing.T) {
-	cfg := RunnerConfig{
+	cfg := config.RunnerConfig{
 		BinaryPath: "/nonexistent/path/llama-server",
 	}
 	// Only fails if the binary actually exists (unlikely in CI).

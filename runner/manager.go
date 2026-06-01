@@ -23,69 +23,72 @@ const (
 	StateError                            // process exited non-zero or health failed
 )
 
-// RunnerConfig is a type alias so external callers don't need to import config/.
-// The manager accepts config.RunnerConfig directly.
-type RunnerConfig = config.RunnerConfig
-
 // Manager is the high-level API for the llama-server subprocess.
-// It holds the resolved binary path, active config, platform, and process.
 type Manager struct {
-	mu         sync.Mutex
-	cfg        RunnerConfig
-	platform   Platform
-	binPath    string        // resolved executable path
-	proc       *Process
-	manState   ManagerState
+	mu       sync.Mutex
+	cfg      config.RunnerConfig
+	platform Platform
+	binPath  string // resolved executable path (set via SetBinaryPath or detection)
+	proc     *Process
+	state    ManagerState
 }
 
 // NewManager creates a Manager. The binary is not started until StartCmd() is called.
+// Binary detection (PATH lookup + data-dir check) is performed eagerly here,
+// outside any lock, so computeStateLocked stays I/O-free.
 func NewManager(cfg config.RunnerConfig) *Manager {
 	m := &Manager{
 		cfg:      cfg,
 		platform: New(ParseBackend(cfg.GPUBackend)),
 	}
-	m.manState = m.computeState()
+	// Detect the binary up-front (I/O is fine here — m is not yet shared).
+	if p, found := Detect(cfg); found {
+		m.binPath = p
+	}
+	m.state = m.computeStateLocked()
 	return m
 }
 
 // Configure updates the manager's config without restarting the process.
+// Binary detection for the new config is performed before taking the lock.
 func (m *Manager) Configure(cfg config.RunnerConfig) {
+	// Resolve the binary for the new config outside the lock.
+	var newBin string
+	if cfg.BinaryPath != "" && isExecutable(cfg.BinaryPath) {
+		newBin = cfg.BinaryPath
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cfg = cfg
 	m.platform = New(ParseBackend(cfg.GPUBackend))
-	if m.manState == StateUnconfigured || m.manState == StateReady {
-		m.manState = m.computeStateLocked()
+	// Respect an explicitly-configured binary; don't overwrite a path that was
+	// already resolved (e.g. set by SetBinaryPath after a download).
+	if newBin != "" {
+		m.binPath = newBin
+	}
+	if m.state == StateUnconfigured || m.state == StateReady {
+		m.state = m.computeStateLocked()
 	}
 }
 
-// SetBinaryPath overrides the resolved binary path.
+// SetBinaryPath overrides the resolved binary path (e.g. after a fresh download).
 func (m *Manager) SetBinaryPath(p string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.binPath = p
-	if m.manState == StateUnconfigured {
-		m.manState = m.computeStateLocked()
+	if m.state == StateUnconfigured {
+		m.state = m.computeStateLocked()
 	}
 }
 
-// State returns the current manager state.
+// State returns the current manager state, syncing against the underlying
+// process state so that unexpected exits are reflected immediately.
 func (m *Manager) State() ManagerState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	// Sync manager state with process state when a process exists.
-	if m.proc != nil {
-		switch m.proc.State() {
-		case ProcessStopped:
-			if m.manState == StateStarting || m.manState == StateRunning {
-				m.manState = StateStopped
-			}
-		case ProcessError:
-			m.manState = StateError
-		}
-	}
-	return m.manState
+	m.syncProcessStateLocked()
+	return m.state
 }
 
 // Platform returns the platform the manager is configured for.
@@ -125,11 +128,11 @@ func (m *Manager) ResolvedBinPath() string {
 	return m.binPath
 }
 
-// ── tea.Cmd helpers ────────────────────────────────────────────────────────
+// ── tea.Cmd helpers ───────────────────────────────────────────────────────
 
-// StartCmd spawns the llama-server process and returns a tea.Cmd.
-// The cmd returns RunnerStartedMsg when the process has been launched
-// (not yet health-checked — use PollUntilReadyCmd for that).
+// StartCmd spawns the llama-server process and returns a RunnerStartedMsg.
+// The process is spawned but not yet health-checked; use PollUntilReadyCmd
+// (or StartAndPollCmd) to wait for readiness.
 func (m *Manager) StartCmd() tea.Cmd {
 	return func() tea.Msg {
 		if err := m.start(); err != nil {
@@ -139,43 +142,38 @@ func (m *Manager) StartCmd() tea.Cmd {
 	}
 }
 
-// StopCmd stops the running process and returns a tea.Cmd.
+// StopCmd stops the running process and returns a RunnerStoppedMsg.
 func (m *Manager) StopCmd() tea.Cmd {
 	return func() tea.Msg {
-		err := m.stop()
-		return RunnerStoppedMsg{Err: err}
+		return RunnerStoppedMsg{Err: m.stop()}
 	}
 }
 
-// HealthCheckCmd performs a single GET /health and returns a tea.Cmd.
+// HealthCheckCmd performs a single GET /health and returns a HealthCheckMsg.
 func (m *Manager) HealthCheckCmd() tea.Cmd {
 	return func() tea.Msg {
 		ok, err := m.healthCheck()
 		if ok {
 			m.mu.Lock()
-			if m.proc != nil {
-				m.proc.MarkRunning()
-			}
-			m.manState = StateRunning
+			m.markRunningLocked()
 			m.mu.Unlock()
 		}
 		return HealthCheckMsg{OK: ok, Err: err}
 	}
 }
 
-// PollUntilReadyCmd polls GET /health every 500ms until the server responds 200
-// or the timeout elapses. Returns RunnerStartedMsg with Err set on timeout.
+// PollUntilReadyCmd polls GET /health every 500 ms until the server responds 200
+// or the timeout elapses. Returns RunnerStartedMsg; Err is set on timeout.
+//
+// The process must already be running. To start and poll in one step use
+// StartAndPollCmd.
 func (m *Manager) PollUntilReadyCmd(timeout time.Duration) tea.Cmd {
 	return func() tea.Msg {
 		deadline := time.Now().Add(timeout)
 		for time.Now().Before(deadline) {
-			ok, _ := m.healthCheck()
-			if ok {
+			if ok, _ := m.healthCheck(); ok {
 				m.mu.Lock()
-				if m.proc != nil {
-					m.proc.MarkRunning()
-				}
-				m.manState = StateRunning
+				m.markRunningLocked()
 				m.mu.Unlock()
 				return RunnerStartedMsg{}
 			}
@@ -185,14 +183,35 @@ func (m *Manager) PollUntilReadyCmd(timeout time.Duration) tea.Cmd {
 	}
 }
 
-// ── internals ──────────────────────────────────────────────────────────────
+// StartAndPollCmd starts the process then polls until healthy or the timeout
+// elapses. This is the single cmd to use from the setup screen's
+// stepStartingRunner entry.
+func (m *Manager) StartAndPollCmd(timeout time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.start(); err != nil {
+			return RunnerStartedMsg{Err: err}
+		}
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			if ok, _ := m.healthCheck(); ok {
+				m.mu.Lock()
+				m.markRunningLocked()
+				m.mu.Unlock()
+				return RunnerStartedMsg{}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		return RunnerStartedMsg{Err: fmt.Errorf("server did not become healthy within %s", timeout)}
+	}
+}
+
+// ── internals ─────────────────────────────────────────────────────────────
 
 func (m *Manager) start() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.binPath == "" {
-		// Try to auto-detect.
 		p, found := Detect(m.cfg)
 		if !found {
 			return fmt.Errorf("llama-server not found; run setup or set binary_path in config")
@@ -203,12 +222,11 @@ func (m *Manager) start() error {
 		return fmt.Errorf("model_path is not configured")
 	}
 
-	args := buildArgs(m.cfg)
-	m.proc = NewProcess(m.binPath, args)
-	m.manState = StateStarting
+	m.proc = NewProcess(m.binPath, buildArgs(m.cfg))
+	m.state = StateStarting
 
 	if err := m.proc.Start(); err != nil {
-		m.manState = StateError
+		m.state = StateError
 		return fmt.Errorf("start llama-server: %w", err)
 	}
 	return nil
@@ -224,7 +242,7 @@ func (m *Manager) stop() error {
 	}
 	err := proc.Stop()
 	m.mu.Lock()
-	m.manState = StateStopped
+	m.state = StateStopped
 	m.mu.Unlock()
 	return err
 }
@@ -242,7 +260,6 @@ func (m *Manager) healthCheck() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false, err
@@ -251,30 +268,42 @@ func (m *Manager) healthCheck() (bool, error) {
 	return resp.StatusCode == http.StatusOK, nil
 }
 
-// computeState returns the initial ManagerState based on cfg and resolved path.
-// Must be called without holding m.mu (uses computeStateLocked internally).
-func (m *Manager) computeState() ManagerState {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.computeStateLocked()
+// syncProcessStateLocked updates m.state to reflect the current process state.
+// Must be called with m.mu held.
+func (m *Manager) syncProcessStateLocked() {
+	if m.proc == nil {
+		return
+	}
+	switch m.proc.State() {
+	case ProcessStopped:
+		if m.state == StateStarting || m.state == StateRunning {
+			m.state = StateStopped
+		}
+	case ProcessError:
+		m.state = StateError
+	}
 }
 
-// computeStateLocked computes state; caller must hold m.mu.
-func (m *Manager) computeStateLocked() ManagerState {
-	hasBin := m.binPath != "" || m.cfg.BinaryPath != ""
-	if !hasBin {
-		// Check PATH and data dir.
-		_, found := Detect(m.cfg)
-		hasBin = found
+// markRunningLocked transitions the manager and process to the Running state.
+// Must be called with m.mu held.
+func (m *Manager) markRunningLocked() {
+	if m.proc != nil {
+		m.proc.MarkRunning()
 	}
-	if !hasBin || m.cfg.ModelPath == "" {
+	m.state = StateRunning
+}
+
+// computeStateLocked returns the appropriate initial state based on currently
+// cached fields. Does not perform any I/O. Caller must hold m.mu.
+func (m *Manager) computeStateLocked() ManagerState {
+	if m.binPath == "" || m.cfg.ModelPath == "" {
 		return StateUnconfigured
 	}
 	return StateReady
 }
 
 // buildArgs constructs the llama-server command-line arguments from cfg.
-func buildArgs(cfg RunnerConfig) []string {
+func buildArgs(cfg config.RunnerConfig) []string {
 	args := []string{
 		"--model", cfg.ModelPath,
 		"--port", fmt.Sprintf("%d", cfg.Port),
