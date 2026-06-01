@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -205,7 +206,8 @@ func extractBinary(archivePath, url string, platform Platform, destDir string) (
 	return extractBinaryZip(archivePath, platform, destDir)
 }
 
-// extractBinaryZip extracts the llama-server binary from a ZIP archive.
+// extractBinaryZip extracts the llama-server binary and any companion shared
+// libraries (.so on Linux/macOS, .dll on Windows) from a ZIP archive.
 func extractBinaryZip(zipPath string, platform Platform, destDir string) (string, error) {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -214,8 +216,11 @@ func extractBinaryZip(zipPath string, platform Platform, destDir string) (string
 	defer zr.Close()
 
 	binaryName := platform.BinaryName()
+	var binaryPath string
+
 	for _, f := range zr.File {
-		if filepath.Base(f.Name) != binaryName {
+		base := filepath.Base(f.Name)
+		if base != binaryName && !isSharedLib(base) {
 			continue
 		}
 
@@ -224,7 +229,7 @@ func extractBinaryZip(zipPath string, platform Platform, destDir string) (string
 			return "", fmt.Errorf("open zip entry %s: %w", f.Name, err)
 		}
 
-		destPath := filepath.Join(destDir, binaryName)
+		destPath := filepath.Join(destDir, base)
 		out, err := os.Create(destPath)
 		if err != nil {
 			rc.Close()
@@ -243,13 +248,25 @@ func extractBinaryZip(zipPath string, platform Platform, destDir string) (string
 		if err := os.Chmod(destPath, 0o755); err != nil {
 			return "", fmt.Errorf("chmod %s: %w", destPath, err)
 		}
-		return destPath, nil
+		if base == binaryName {
+			binaryPath = destPath
+		}
 	}
 
-	return "", fmt.Errorf("binary %q not found in ZIP", binaryName)
+	if binaryPath == "" {
+		return "", fmt.Errorf("binary %q not found in ZIP", binaryName)
+	}
+	return binaryPath, nil
 }
 
-// extractBinaryTarGz extracts the llama-server binary from a .tar.gz archive.
+// extractBinaryTarGz extracts the llama-server binary and any companion shared
+// libraries (.so on Linux/macOS, .dll on Windows) from a .tar.gz archive.
+//
+// Recent llama.cpp releases ship a flat directory of shared libraries alongside
+// the thin llama-server launcher (e.g. libllama-server-impl.so, libllama.so,
+// libggml*.so …) plus version-symlinks that point between them. All regular
+// files and symlinks whose names look like shared libraries, as well as the
+// main binary, are written into destDir.
 func extractBinaryTarGz(archivePath string, platform Platform, destDir string) (string, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
@@ -265,6 +282,7 @@ func extractBinaryTarGz(archivePath string, platform Platform, destDir string) (
 
 	tr := tar.NewReader(gr)
 	binaryName := platform.BinaryName()
+	var binaryPath string
 
 	for {
 		hdr, err := tr.Next()
@@ -274,31 +292,59 @@ func extractBinaryTarGz(archivePath string, platform Platform, destDir string) (
 		if err != nil {
 			return "", fmt.Errorf("read tar: %w", err)
 		}
-		if hdr.Typeflag != tar.TypeReg {
-			continue
-		}
-		if filepath.Base(hdr.Name) != binaryName {
+
+		base := filepath.Base(hdr.Name)
+		wantFile := base == binaryName || isSharedLib(base)
+		if !wantFile {
 			continue
 		}
 
-		destPath := filepath.Join(destDir, binaryName)
-		out, err := os.Create(destPath)
-		if err != nil {
-			return "", fmt.Errorf("create %s: %w", destPath, err)
-		}
+		destPath := filepath.Join(destDir, base)
 
-		if _, err := io.Copy(out, tr); err != nil {
+		switch hdr.Typeflag {
+		case tar.TypeReg:
+			out, err := os.Create(destPath)
+			if err != nil {
+				return "", fmt.Errorf("create %s: %w", destPath, err)
+			}
+			if _, err := io.Copy(out, tr); err != nil {
+				out.Close()
+				os.Remove(destPath)
+				return "", fmt.Errorf("write %s: %w", destPath, err)
+			}
 			out.Close()
-			os.Remove(destPath)
-			return "", fmt.Errorf("write %s: %w", destPath, err)
-		}
-		out.Close()
+			if err := os.Chmod(destPath, 0o755); err != nil {
+				return "", fmt.Errorf("chmod %s: %w", destPath, err)
+			}
+			if base == binaryName {
+				binaryPath = destPath
+			}
 
-		if err := os.Chmod(destPath, 0o755); err != nil {
-			return "", fmt.Errorf("chmod %s: %w", destPath, err)
+		case tar.TypeSymlink:
+			// Symlink target is relative (e.g. "libfoo.so.0.0.1").
+			// Remove any stale entry first so os.Symlink doesn't fail.
+			_ = os.Remove(destPath)
+			if err := os.Symlink(hdr.Linkname, destPath); err != nil {
+				return "", fmt.Errorf("symlink %s -> %s: %w", destPath, hdr.Linkname, err)
+			}
 		}
-		return destPath, nil
 	}
 
-	return "", fmt.Errorf("binary %q not found in tar.gz", binaryName)
+	if binaryPath == "" {
+		return "", fmt.Errorf("binary %q not found in tar.gz", binaryName)
+	}
+	return binaryPath, nil
+}
+
+// isSharedLib reports whether filename is a shared library that should be
+// extracted alongside the main binary.
+//
+//   - Linux/macOS: any file whose base name contains ".so" (covers libfoo.so,
+//     libfoo.so.1, libfoo.so.1.2.3, etc.)
+//   - Windows:     any ".dll" file
+func isSharedLib(name string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.HasSuffix(name, ".dll")
+	}
+	return strings.Contains(name, ".so")
 }

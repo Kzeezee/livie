@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -223,6 +225,7 @@ func (m *Manager) start() error {
 	}
 
 	m.proc = NewProcess(m.binPath, buildArgs(m.cfg))
+	m.proc.Env(libPathEnv(m.binPath))
 	m.state = StateStarting
 
 	if err := m.proc.Start(); err != nil {
@@ -300,6 +303,27 @@ func (m *Manager) computeStateLocked() ManagerState {
 		return StateUnconfigured
 	}
 	return StateReady
+}
+
+// libPathEnv returns environment variable overrides that prepend the directory
+// containing binPath to the OS-specific shared-library search path.
+// This allows companion .so / .dylib / .dll files sitting next to the binary
+// (e.g. libllama-server-impl.so) to be found without any system-wide config.
+func libPathEnv(binPath string) []string {
+	dir := filepath.Dir(binPath)
+	var vars []string
+	if existing := os.Getenv("LD_LIBRARY_PATH"); existing != "" {
+		vars = append(vars, "LD_LIBRARY_PATH="+dir+":"+existing)
+	} else {
+		vars = append(vars, "LD_LIBRARY_PATH="+dir)
+	}
+	// macOS uses a different variable; setting both is harmless on each platform.
+	if existing := os.Getenv("DYLD_LIBRARY_PATH"); existing != "" {
+		vars = append(vars, "DYLD_LIBRARY_PATH="+dir+":"+existing)
+	} else {
+		vars = append(vars, "DYLD_LIBRARY_PATH="+dir)
+	}
+	return vars
 }
 
 // buildArgs constructs the llama-server command-line arguments from cfg.

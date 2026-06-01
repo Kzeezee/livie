@@ -874,13 +874,16 @@ func (m SetupModel) renderStartingRunner() string {
 	label := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextPrimary)).
 		Render("  Starting llama-server...")
 
-	modelName := filepath.Base(m.cfg.Runner.ModelPath)
+	modelPath := m.cfg.Runner.ModelPath
+	modelName := filepath.Base(modelPath)
 	if modelName == "" || modelName == "." {
 		modelName = "(no model)"
+		modelPath = "(no model)"
 	}
 	meta := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextSecondary)).
-		Render(fmt.Sprintf("%s\nContext: %s tokens · GPU layers: %s · Port: %d",
+		Render(fmt.Sprintf("%s\n%s\nContext: %s tokens · GPU layers: %s · Port: %d",
 			modelName,
+			modelPath,
 			formatInt(m.cfg.Runner.ContextSize),
 			gpuLayersLabel(m.cfg.Runner.GPULayers),
 			m.cfg.Runner.Port,
