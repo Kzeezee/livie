@@ -27,12 +27,13 @@ const (
 
 // Manager is the high-level API for the llama-server subprocess.
 type Manager struct {
-	mu       sync.Mutex
-	cfg      config.RunnerConfig
-	platform Platform
-	binPath  string // resolved executable path (set via SetBinaryPath or detection)
-	proc     *Process
-	state    ManagerState
+	mu        sync.Mutex
+	cfg       config.RunnerConfig
+	platform  Platform
+	binPath   string // resolved executable path (set via SetBinaryPath or detection)
+	proc      *Process
+	state     ManagerState
+	startedAt time.Time // set when health first passes; zeroed on stop/error
 }
 
 // NewManager creates a Manager. The binary is not started until StartCmd() is called.
@@ -185,6 +186,51 @@ func (m *Manager) PollUntilReadyCmd(timeout time.Duration) tea.Cmd {
 	}
 }
 
+// Uptime returns how long the server has been healthy (since the first passing
+// health check). Returns 0 when the server is not currently running.
+func (m *Manager) Uptime() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.startedAt.IsZero() {
+		return 0
+	}
+	return time.Since(m.startedAt)
+}
+
+// PID returns the OS process ID of the running llama-server, or 0.
+func (m *Manager) PID() int {
+	m.mu.Lock()
+	proc := m.proc
+	m.mu.Unlock()
+	if proc == nil {
+		return 0
+	}
+	return proc.Pid()
+}
+
+// RestartCmd stops the current process, starts a fresh one, and polls until
+// healthy or timeout elapses. Returns RunnerStartedMsg.
+// This is the single cmd to use for /run restart and /model <path> switches.
+func (m *Manager) RestartCmd(timeout time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		_ = m.stop()
+		if err := m.start(); err != nil {
+			return RunnerStartedMsg{Err: err}
+		}
+		deadline := time.Now().Add(timeout)
+		for time.Now().Before(deadline) {
+			if ok, _ := m.healthCheck(); ok {
+				m.mu.Lock()
+				m.markRunningLocked()
+				m.mu.Unlock()
+				return RunnerStartedMsg{}
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		return RunnerStartedMsg{Err: fmt.Errorf("restart did not become healthy within %s", timeout)}
+	}
+}
+
 // StartAndPollCmd starts the process then polls until healthy or the timeout
 // elapses. This is the single cmd to use from the setup screen's
 // stepStartingRunner entry.
@@ -246,6 +292,7 @@ func (m *Manager) stop() error {
 	err := proc.Stop()
 	m.mu.Lock()
 	m.state = StateStopped
+	m.startedAt = time.Time{}
 	m.mu.Unlock()
 	return err
 }
@@ -281,9 +328,11 @@ func (m *Manager) syncProcessStateLocked() {
 	case ProcessStopped:
 		if m.state == StateStarting || m.state == StateRunning {
 			m.state = StateStopped
+			m.startedAt = time.Time{}
 		}
 	case ProcessError:
 		m.state = StateError
+		m.startedAt = time.Time{}
 	}
 }
 
@@ -294,6 +343,10 @@ func (m *Manager) markRunningLocked() {
 		m.proc.MarkRunning()
 	}
 	m.state = StateRunning
+	// Record the moment the server became healthy (not when the process started).
+	if m.startedAt.IsZero() {
+		m.startedAt = time.Now()
+	}
 }
 
 // computeStateLocked returns the appropriate initial state based on currently

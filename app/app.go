@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/kez/livie/config"
 	"github.com/kez/livie/runner"
+	"github.com/kez/livie/tui"
 	"github.com/kez/livie/tui/screens"
 )
 
@@ -48,7 +49,7 @@ func New(cfg *config.Config, mgr *runner.Manager) Model {
 	return Model{
 		current: current,
 		setup:   screens.NewSetupModel(cfg, mgr, w, h),
-		chat:    screens.NewChatModel(cfg, w, h),
+		chat:    screens.NewChatModel(cfg, mgr, w, h),
 		cfg:     cfg,
 		runner:  mgr,
 		width:   w,
@@ -77,7 +78,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.current = screenChat
 		// Re-create the chat model with the final config so the welcome block
 		// reflects any changes made during setup.
-		m.chat = screens.NewChatModel(m.cfg, m.width, m.height)
+		m.chat = screens.NewChatModel(m.cfg, m.runner, m.width, m.height)
 		return m, m.chat.Init()
 	}
 
@@ -93,6 +94,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setup, _ = m.setup.Update(ws)
 		m.chat, _ = m.chat.Update(ws)
 		return m, nil
+	}
+
+	// ── Chat → Setup transition (from /setup command) ───────────────────────
+	if action, ok := msg.(tui.CommandActionMsg); ok && action.Action == tui.ActionOpenSetup {
+		m.setup = screens.NewSetupModel(m.cfg, m.runner, m.width, m.height)
+		m.current = screenSetup
+		return m, m.setup.Init()
 	}
 
 	// ── Route to active screen ───────────────────────────────────────────────

@@ -19,6 +19,18 @@ const (
 	ModeBash
 )
 
+// RunnerStatus is the live health state of the local runner as reported to the HUD.
+// Updated by ChatModel on every hudTickMsg.
+type RunnerStatus int
+
+const (
+	RunnerStatusNone     RunnerStatus = iota // no local runner configured / remote endpoint active
+	RunnerStatusStopped                      // configured but not running
+	RunnerStatusStarting                     // process up, health not yet passing
+	RunnerStatusRunning                      // health check passing
+	RunnerStatusError                        // process exited unexpectedly
+)
+
 // HUDHeight is the number of terminal rows the HUD occupies.
 const HUDHeight = 3
 
@@ -41,6 +53,10 @@ type HUDState struct {
 	SkillCount   int
 	StatusMsg    string // e.g. "Ready", "Connecting to model...", "Error loading config"
 	StatusOK     bool   // true = green ✓, false = rose ✗
+
+	// Runner chip (Phase 4)
+	RunnerStatus RunnerStatus
+	RunnerLabel  string // e.g. "llama-server" | "stopped" | "starting"
 }
 
 // DefaultHUDState returns stub values for Phase 1.
@@ -54,6 +70,8 @@ func DefaultHUDState() HUDState {
 		SkillCount:   0,
 		StatusMsg:    "Ready",
 		StatusOK:     true,
+		RunnerStatus: RunnerStatusNone,
+		RunnerLabel:  "",
 	}
 }
 
@@ -71,7 +89,10 @@ func RenderHUD(state HUDState, width int) string {
 	modeTag := renderModeBadge(state.Mode)
 	row1Content := dirStr + "  " + modeTag
 
-	// ── Row 2: tokens · skills (left)   (endpoint) model (right) ─────────────
+	// ── Row 2: [runner chip]  tokens · skills (left)   (endpoint) model (right) ─
+	chipStr := renderRunnerChip(state)
+	chipW := lipgloss.Width(chipStr)
+
 	tokenStr := renderTokens(state.TokensUsed, state.TokensMax)
 	skillStr := tui.StyleMuted.Render(fmt.Sprintf("· %d skills", state.SkillCount))
 	statsLeft := tokenStr + "  " + skillStr
@@ -80,13 +101,13 @@ func RenderHUD(state HUDState, width int) string {
 	modelStr := tui.StyleValue.Render(" " + truncate(state.ModelName, 24))
 	statsRight := endpointStr + modelStr
 
-	lw2 := lipgloss.Width(statsLeft)
+	lw2 := chipW + lipgloss.Width(statsLeft)
 	rw2 := lipgloss.Width(statsRight)
 	pad2 := inner - lw2 - rw2
 	if pad2 < 1 {
 		pad2 = 1
 	}
-	row2Content := statsLeft + strings.Repeat(" ", pad2) + statsRight
+	row2Content := chipStr + statsLeft + strings.Repeat(" ", pad2) + statsRight
 
 	// ── Row 3: ✓/✗ status ────────────────────────────────────────────────────
 	row3Content := renderStatusLine(state.StatusMsg, state.StatusOK)
@@ -194,6 +215,51 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-1] + "…"
+}
+
+// renderRunnerChip returns a fixed 18-visible-char wide runner status chip,
+// or "" when the chip should be hidden (RunnerStatusNone).
+//
+// Layout: symbol(1) + space(1) + label padded to 16 = 18 chars total.
+//
+// | Status   | Symbol | Colour          |
+// |----------|--------|-----------------|
+// | Stopped  |  ◌     | ColTextMuted    |
+// | Starting |  ◎     | ColAccentAmber  |
+// | Running  |  ◉     | ColAccentGreen  |
+// | Error    |  ◌     | ColAccentRose   |
+func renderRunnerChip(state HUDState) string {
+	const chipWidth = 18
+	const labelWidth = chipWidth - 2 // symbol(1) + space(1)
+
+	var symbol, colour string
+	switch state.RunnerStatus {
+	case RunnerStatusNone:
+		return ""
+	case RunnerStatusStopped:
+		symbol, colour = "◌", tui.ColTextMuted
+	case RunnerStatusStarting:
+		symbol, colour = "◎", tui.ColAccentAmber
+	case RunnerStatusRunning:
+		symbol, colour = "◉", tui.ColAccentGreen
+	case RunnerStatusError:
+		symbol, colour = "◌", tui.ColAccentRose
+	default:
+		return ""
+	}
+
+	// Pad label to exactly labelWidth visible chars so the chip is always chipWidth wide.
+	label := state.RunnerLabel
+	if len(label) > labelWidth {
+		label = label[:labelWidth]
+	}
+	padded := label + strings.Repeat(" ", labelWidth-len(label))
+
+	raw := symbol + " " + padded
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color(colour)).
+		Bold(true).
+		Render(raw)
 }
 
 func formatInt(n int) string {

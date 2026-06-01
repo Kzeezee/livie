@@ -9,12 +9,16 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/kez/livie/config"
+	"github.com/kez/livie/runner"
 	"github.com/kez/livie/tui"
 	"github.com/kez/livie/tui/components"
 )
 
 // quitConfirmMsg fires when the second ctrl+c window expires.
 type quitConfirmMsg struct{}
+
+// hudTickMsg fires every second to refresh runner state in the HUD.
+type hudTickMsg struct{}
 
 // Styles created once and reused every frame.
 var (
@@ -26,8 +30,9 @@ var (
 
 // ChatModel is the primary screen — welcome block + chat in one viewport.
 type ChatModel struct {
-	cfg      *config.Config
-	keys     tui.KeyMap
+	cfg    *config.Config
+	runner *runner.Manager
+	keys   tui.KeyMap
 	registry *tui.CommandRegistry
 
 	hud          components.HUDState
@@ -48,14 +53,15 @@ const (
 	divHeight = 2                    // divider above input + divider above HUD
 )
 
-func NewChatModel(cfg *config.Config, width, height int) ChatModel {
+func NewChatModel(cfg *config.Config, mgr *runner.Manager, width, height int) ChatModel {
 	inputModel := components.NewInputModel(width)
 	vpH := viewportH(height, inputModel.Height(), 0)
 
 	m := ChatModel{
 		cfg:          cfg,
+		runner:       mgr,
 		keys:         tui.DefaultKeyMap(),
-		registry:     tui.NewCommandRegistry(),
+		registry:     tui.NewCommandRegistry(cfg, mgr),
 		hud:          components.DefaultHUDState(),
 		messages:     components.NewMessagesModel(width, vpH),
 		input:        inputModel,
@@ -66,8 +72,16 @@ func NewChatModel(cfg *config.Config, width, height int) ChatModel {
 	}
 
 	m.registry.Register(newCmd(m))
+	m.syncHUDRunnerState()
 	m.showWelcome()
 	return m
+}
+
+// hudTickCmd returns a tea.Cmd that fires hudTickMsg after one second.
+func hudTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return hudTickMsg{}
+	})
 }
 
 // showWelcome renders the welcome block into the top of the viewport.
@@ -79,7 +93,10 @@ func (m *ChatModel) showWelcome() {
 }
 
 func (m ChatModel) Init() tea.Cmd {
-	return m.input.Init()
+	return tea.Batch(
+		m.input.Init(),
+		hudTickCmd(), // start HUD polling immediately
+	)
 }
 
 func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
@@ -107,6 +124,38 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		if cmd := m.handleAction(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+
+	case hudTickMsg:
+		m.syncHUDRunnerState()
+		cmds = append(cmds, hudTickCmd()) // perpetually re-issue
+
+	case runner.RunnerStartedMsg:
+		m.syncHUDRunnerState()
+		if msg.Err != nil {
+			m.messages.AddMessage(components.NewMessage(
+				components.MsgSystem,
+				fmt.Sprintf("runner failed to start: %s", msg.Err),
+			))
+		} else {
+			m.messages.AddMessage(components.NewMessage(
+				components.MsgSystem, "runner started",
+			))
+		}
+		m.messages.GotoBottom()
+
+	case runner.RunnerStoppedMsg:
+		m.syncHUDRunnerState()
+		if msg.Err != nil {
+			m.messages.AddMessage(components.NewMessage(
+				components.MsgSystem,
+				fmt.Sprintf("runner failed to stop: %s", msg.Err),
+			))
+		} else {
+			m.messages.AddMessage(components.NewMessage(
+				components.MsgSystem, "runner stopped",
+			))
+		}
+		m.messages.GotoBottom()
 
 	case quitConfirmMsg:
 		m.quitFirst = false
@@ -236,9 +285,56 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 
 	case tui.ActionSetModeBash:
 		m.setMode(components.ModeBash)
+
+	case tui.ActionRunnerStart:
+		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "starting runner…"))
+		m.messages.GotoBottom()
+		return m.runner.StartAndPollCmd(30 * time.Second)
+
+	case tui.ActionRunnerStop:
+		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "stopping runner…"))
+		m.messages.GotoBottom()
+		return m.runner.StopCmd()
+
+	case tui.ActionRunnerRestart:
+		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "restarting runner…"))
+		m.messages.GotoBottom()
+		return m.runner.RestartCmd(30 * time.Second)
 	}
 
 	return nil
+}
+
+// syncHUDRunnerState reads the runner's current state and maps it to the HUD fields.
+// No I/O — Manager.State() is a mutex-guarded field read.
+func (m *ChatModel) syncHUDRunnerState() {
+	if m.runner == nil {
+		m.hud.RunnerStatus = components.RunnerStatusNone
+		m.hud.RunnerLabel = ""
+		return
+	}
+	switch m.runner.State() {
+	case runner.StateUnconfigured, runner.StateReady:
+		m.hud.RunnerStatus = components.RunnerStatusStopped
+		m.hud.RunnerLabel = "stopped"
+	case runner.StateStarting:
+		m.hud.RunnerStatus = components.RunnerStatusStarting
+		m.hud.RunnerLabel = "starting"
+	case runner.StateRunning:
+		m.hud.RunnerStatus = components.RunnerStatusRunning
+		m.hud.RunnerLabel = "llama-server"
+	case runner.StateStopped:
+		m.hud.RunnerStatus = components.RunnerStatusStopped
+		m.hud.RunnerLabel = "stopped"
+	case runner.StateError:
+		m.hud.RunnerStatus = components.RunnerStatusError
+		m.hud.RunnerLabel = "error"
+	}
+	// Hide the chip when the active endpoint is not the local runner.
+	if m.cfg.Endpoint.Active != "local" {
+		m.hud.RunnerStatus = components.RunnerStatusNone
+		m.hud.RunnerLabel = ""
+	}
 }
 
 func (m *ChatModel) setMode(mode components.InputMode) {

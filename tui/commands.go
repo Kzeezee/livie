@@ -2,7 +2,13 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/kez/livie/config"
+	"github.com/kez/livie/runner"
 )
 
 // CommandHandler is a function executed when a /command is invoked.
@@ -14,11 +20,17 @@ type CommandHandler func(args []string) (response string, action AppAction)
 type AppAction int
 
 const (
-	ActionNone AppAction = iota
-	ActionQuit
-	ActionNew
-	ActionSetModeChat
-	ActionSetModeBash
+	ActionNone        AppAction = iota
+	ActionQuit                  // handled by ChatModel.handleAction
+	ActionNew                   // handled by ChatModel.handleAction
+	ActionSetModeChat           // handled by ChatModel.handleAction
+	ActionSetModeBash           // handled by ChatModel.handleAction
+
+	// Phase 5 additions:
+	ActionOpenSetup     // intercepted by app.Model.Update — triggers screen switch
+	ActionRunnerStart   // handled by ChatModel.handleAction
+	ActionRunnerStop    // handled by ChatModel.handleAction
+	ActionRunnerRestart // handled by ChatModel.handleAction
 )
 
 // Command describes a registered /command.
@@ -36,11 +48,12 @@ type CommandRegistry struct {
 }
 
 // NewCommandRegistry creates a registry with all built-in commands registered.
-func NewCommandRegistry() *CommandRegistry {
+// cfg and mgr are captured by the runner-aware command handlers via closures.
+func NewCommandRegistry(cfg *config.Config, mgr *runner.Manager) *CommandRegistry {
 	r := &CommandRegistry{
 		commands: make(map[string]*Command),
 	}
-	r.registerBuiltins()
+	r.registerBuiltins(cfg, mgr)
 	return r
 }
 
@@ -113,8 +126,9 @@ func (r *CommandRegistry) HelpText() string {
 	return sb.String()
 }
 
-// registerBuiltins registers all Phase 1 commands.
-func (r *CommandRegistry) registerBuiltins() {
+// registerBuiltins registers all built-in commands.
+// cfg and mgr are captured by the runner-aware handlers via closures.
+func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manager) {
 	// /help
 	r.Register(&Command{
 		Name:        "help",
@@ -144,7 +158,84 @@ func (r *CommandRegistry) registerBuiltins() {
 		},
 	})
 
-	// ── Phase 2 stubs ──────────────────────────────────────────────
+	// /setup — re-opens the setup wizard
+	r.Register(&Command{
+		Name:        "setup",
+		Description: "Re-open the setup wizard",
+		Handler: func(args []string) (string, AppAction) {
+			return "", ActionOpenSetup
+		},
+	})
+
+	// /run — manage the local llama-server runner
+	r.Register(&Command{
+		Name:        "run",
+		Description: "Manage the local llama-server runner",
+		Handler: func(args []string) (string, AppAction) {
+			sub := "status"
+			if len(args) > 0 {
+				sub = strings.ToLower(args[0])
+			}
+			switch sub {
+			case "start":
+				return "", ActionRunnerStart
+			case "stop":
+				return "", ActionRunnerStop
+			case "restart":
+				return "", ActionRunnerRestart
+			case "status":
+				return runStatus(cfg, mgr), ActionNone
+			case "log":
+				return runLog(mgr), ActionNone
+			default:
+				return fmt.Sprintf(
+					"unknown subcommand: %q\n\nUsage: `/run [start|stop|restart|status|log]`",
+					sub,
+				), ActionNone
+			}
+		},
+	})
+
+	// /model — show or switch the active model file
+	r.Register(&Command{
+		Name:        "model",
+		Description: "Show or switch the active model file",
+		Handler: func(args []string) (string, AppAction) {
+			if len(args) == 0 {
+				return modelStatus(cfg), ActionNone
+			}
+			path, err := resolveModelPath(args[0])
+			if err != nil {
+				return "✗ " + err.Error(), ActionNone
+			}
+			cfg.Runner.ModelPath = path
+			_ = config.Save(cfg, cfg.ConfigPath)
+			mgr.Configure(cfg.Runner)
+			name := filepath.Base(path)
+			if mgr.IsRunning() {
+				return fmt.Sprintf("model set to **%s** — restarting runner…", name), ActionRunnerRestart
+			}
+			return fmt.Sprintf("model set to **%s**", name), ActionNone
+		},
+	})
+
+	// /endpoint — show or switch the active API endpoint
+	r.Register(&Command{
+		Name:        "endpoint",
+		Description: "Show or switch the active API endpoint",
+		Handler: func(args []string) (string, AppAction) {
+			if len(args) == 0 {
+				return endpointStatus(cfg), ActionNone
+			}
+			sub := strings.ToLower(args[0])
+			if sub == "list" {
+				return endpointList(cfg), ActionNone
+			}
+			return switchEndpoint(cfg, mgr, sub)
+		},
+	})
+
+	// ── Stubs for future phases ──────────────────────────────────────────────
 
 	stub := func(name, desc string) *Command {
 		return &Command{
@@ -159,12 +250,270 @@ func (r *CommandRegistry) registerBuiltins() {
 	r.Register(stub("skills", "List, install, enable or disable skills"))
 	r.Register(stub("usage", "Show token usage and cost estimate for this session"))
 	r.Register(stub("resume", "Resume a previous conversation session"))
-	r.Register(stub("model", "Switch the active model"))
-	r.Register(stub("endpoint", "Switch the active API endpoint"))
 	r.Register(stub("memory", "View or edit Livie's memory files"))
 	r.Register(stub("index", "Manage the local media index"))
-	r.Register(stub("run", "Start or stop the local llama-server runner"))
 	r.Register(stub("config", "Open the config file in your editor"))
+}
+
+// ── /run helpers ──────────────────────────────────────────────────────────
+
+// runStatus returns a formatted status block for the local runner.
+func runStatus(cfg *config.Config, mgr *runner.Manager) string {
+	state := mgr.State()
+
+	// State line — include PID when running.
+	stateLabel := stateString(state)
+	if state == runner.StateRunning {
+		if pid := mgr.PID(); pid != 0 {
+			stateLabel = fmt.Sprintf("running  (PID %d)", pid)
+		}
+	}
+
+	// Binary path — shorten home dir to ~.
+	binPath := shortenHome(mgr.ResolvedBinPath())
+	if binPath == "" {
+		binPath = "(not found)"
+	}
+
+	// Model name — basename only.
+	modelName := filepath.Base(cfg.Runner.ModelPath)
+	if cfg.Runner.ModelPath == "" {
+		modelName = "(not configured)"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("runner: %s\n", stateLabel))
+	sb.WriteString(fmt.Sprintf("binary: %s\n", binPath))
+	sb.WriteString(fmt.Sprintf("model:  %s\n", modelName))
+	sb.WriteString(fmt.Sprintf("port:   %d", cfg.Runner.Port))
+
+	if state == runner.StateRunning {
+		if up := mgr.Uptime(); up > 0 {
+			sb.WriteString("\n")
+			sb.WriteString(fmt.Sprintf("uptime: %s", formatUptime(up)))
+		}
+	}
+
+	return sb.String()
+}
+
+// runLog returns the last 20 lines of the ring buffer wrapped in a code fence.
+func runLog(mgr *runner.Manager) string {
+	lines := mgr.LogLines(20)
+	if len(lines) == 0 {
+		return "_No log output captured yet._"
+	}
+	return "```\n" + strings.Join(lines, "\n") + "\n```"
+}
+
+// ── /model helpers ────────────────────────────────────────────────────────
+
+// modelStatus returns a formatted info block for the current model.
+func modelStatus(cfg *config.Config) string {
+	if cfg.Runner.ModelPath == "" {
+		return "_No model configured. Use `/model <path>` to set one._"
+	}
+	name := filepath.Base(cfg.Runner.ModelPath)
+	path := shortenHome(cfg.Runner.ModelPath)
+	ctx := formatContextSize(cfg.Runner.ContextSize)
+	backend := cfg.Runner.GPUBackend
+	if backend == "" {
+		backend = "cpu"
+	}
+	return fmt.Sprintf(
+		"model:    %s\npath:     %s\ncontext:  %s tokens\nbackend:  %s",
+		name, path, ctx, backend,
+	)
+}
+
+// resolveModelPath expands ~ and resolves a user-supplied path to an absolute
+// .gguf file path. Returns an absolute path or an error.
+//
+//  1. File with .gguf extension that exists → use directly
+//  2. Directory → scan (non-recursive) for the first .gguf file
+//  3. Anything else → error
+func resolveModelPath(raw string) (string, error) {
+	// Tilde expansion.
+	if strings.HasPrefix(raw, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine home directory: %w", err)
+		}
+		raw = filepath.Join(home, raw[2:])
+	}
+
+	// Absolute-ify relative paths.
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("path not found: %s", abs)
+	}
+
+	// Direct .gguf file.
+	if !info.IsDir() {
+		if filepath.Ext(abs) != ".gguf" {
+			return "", fmt.Errorf("not a .gguf file: %s", abs)
+		}
+		return abs, nil
+	}
+
+	// Directory — scan for the first .gguf.
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		return "", fmt.Errorf("cannot read directory %s: %w", abs, err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".gguf" {
+			return filepath.Join(abs, e.Name()), nil
+		}
+	}
+	return "", fmt.Errorf("no .gguf file found in %s", abs)
+}
+
+// ── /endpoint helpers ─────────────────────────────────────────────────────
+
+// endpointStatus returns a one-liner showing the active endpoint.
+func endpointStatus(cfg *config.Config) string {
+	ep := cfg.ActiveEndpoint()
+	if ep.Name == "" {
+		return fmt.Sprintf("active endpoint: **%s** _(not found in config)_", cfg.Endpoint.Active)
+	}
+	return fmt.Sprintf("active endpoint: **%s** → %s", ep.Name, ep.BaseURL)
+}
+
+// endpointList returns a table of all configured endpoints.
+func endpointList(cfg *config.Config) string {
+	if len(cfg.Endpoints) == 0 {
+		return "_No endpoints configured._"
+	}
+
+	// Find the longest name for alignment.
+	maxName := 0
+	for _, ep := range cfg.Endpoints {
+		if len(ep.Name) > maxName {
+			maxName = len(ep.Name)
+		}
+	}
+
+	var sb strings.Builder
+	for _, ep := range cfg.Endpoints {
+		padding := strings.Repeat(" ", maxName-len(ep.Name))
+		active := ""
+		if ep.Name == cfg.Endpoint.Active {
+			active = "  **(active)**"
+		}
+		sb.WriteString(fmt.Sprintf("  %s%s  →  %s%s\n", ep.Name, padding, ep.BaseURL, active))
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// switchEndpoint changes the active endpoint, saves config, and returns a
+// user-facing message describing any follow-up action needed.
+func switchEndpoint(cfg *config.Config, mgr *runner.Manager, name string) (string, AppAction) {
+	// Validate the endpoint name.
+	found := false
+	for _, ep := range cfg.Endpoints {
+		if ep.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Sprintf(
+			"✗ endpoint %q not found\n\nAvailable: %s\n\nUse `/endpoint list` to see all endpoints.",
+			name, endpointNames(cfg),
+		), ActionNone
+	}
+
+	prev := cfg.Endpoint.Active
+	cfg.Endpoint.Active = name
+	_ = config.Save(cfg, cfg.ConfigPath)
+
+	switch {
+	case name == "local" && !mgr.IsRunning():
+		return fmt.Sprintf(
+			"switched to **%s** endpoint — use `/run start` to start the runner",
+			name,
+		), ActionNone
+
+	case prev == "local" && name != "local" && mgr.IsRunning():
+		return fmt.Sprintf(
+			"switched to **%s** endpoint — runner left running (use `/run stop` to stop it)",
+			name,
+		), ActionNone
+
+	default:
+		return fmt.Sprintf("switched to **%s** endpoint", name), ActionNone
+	}
+}
+
+// ── small utilities ───────────────────────────────────────────────────────
+
+// stateString maps a runner.ManagerState to a human-readable label.
+func stateString(s runner.ManagerState) string {
+	switch s {
+	case runner.StateUnconfigured:
+		return "unconfigured"
+	case runner.StateReady:
+		return "ready (not started)"
+	case runner.StateStarting:
+		return "starting"
+	case runner.StateRunning:
+		return "running"
+	case runner.StateStopped:
+		return "stopped"
+	case runner.StateError:
+		return "error"
+	default:
+		return "unknown"
+	}
+}
+
+// shortenHome replaces the user's home directory prefix with ~.
+func shortenHome(p string) string {
+	if p == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if strings.HasPrefix(p, home) {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
+// formatUptime formats a duration as "Xm Ys" (e.g. "4m 32s").
+func formatUptime(d time.Duration) string {
+	total := int(d.Seconds())
+	if total < 60 {
+		return fmt.Sprintf("%ds", total)
+	}
+	m := total / 60
+	s := total % 60
+	return fmt.Sprintf("%dm %ds", m, s)
+}
+
+// formatContextSize formats a token count with a comma separator (e.g. 16,384).
+func formatContextSize(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%d,%03d", n/1000, n%1000)
+}
+
+// endpointNames returns a comma-joined list of endpoint names for error messages.
+func endpointNames(cfg *config.Config) string {
+	names := make([]string, len(cfg.Endpoints))
+	for i, ep := range cfg.Endpoints {
+		names[i] = ep.Name
+	}
+	return strings.Join(names, ", ")
 }
 
 // CommandActionMsg carries the result of a dispatched command back to the chat model.
