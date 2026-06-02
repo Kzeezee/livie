@@ -79,8 +79,8 @@ func renderInfoBlock(cfg *config.Config, si tui.SysInfo) string {
 		{"Term", si.Terminal},
 		{"Go", si.GoVersion},
 		{"Config", shortenPath(cfg.ConfigPath)},
-		{"Vault", shortenPath(cfg.VaultPath)},
-		{"Model", cfg.ModelName},
+		{"Vault", shortenPath(cfg.Paths.Vault)},
+		{"Model", cfg.ModelName()},
 		{"Skills", fmt.Sprintf("%d loaded", 0)},
 	}
 
