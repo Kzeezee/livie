@@ -23,6 +23,16 @@ type quitConfirmMsg struct{}
 // hudTickMsg fires every second to refresh runner state in the HUD.
 type hudTickMsg struct{}
 
+// healthTickMsg fires periodically to check whether the local server is still
+// reachable. Decoupled from hudTickMsg so the HUD can stay at 1 s while health
+// checks run much less frequently.
+type healthTickMsg struct{}
+
+// healthCheckInterval is how often Livie pings GET /health while the runner is
+// in StateRunning. 15 s is frequent enough to notice a crash quickly without
+// hammering the server with constant requests.
+const healthCheckInterval = 15 * time.Second
+
 // Styles created once and reused every frame.
 var (
 	dividerStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColBorder))
@@ -94,6 +104,14 @@ func hudTickCmd() tea.Cmd {
 	})
 }
 
+// healthTickCmd returns a tea.Cmd that fires healthTickMsg after healthCheckInterval.
+// Only issued when the runner is in StateRunning.
+func healthTickCmd() tea.Cmd {
+	return tea.Tick(healthCheckInterval, func(time.Time) tea.Msg {
+		return healthTickMsg{}
+	})
+}
+
 // showWelcome renders the welcome block into the top of the viewport.
 func (m *ChatModel) showWelcome() {
 	block := RenderWelcomeBlock(m.cfg, m.width)
@@ -105,7 +123,8 @@ func (m *ChatModel) showWelcome() {
 func (m ChatModel) Init() tea.Cmd {
 	return tea.Batch(
 		m.input.Init(),
-		hudTickCmd(), // start HUD polling immediately
+		hudTickCmd(),    // 1 s HUD refresh
+		healthTickCmd(), // 15 s liveness probe
 	)
 }
 
@@ -138,16 +157,20 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 	case hudTickMsg:
 		m.syncHUDState()
 		cmds = append(cmds, hudTickCmd()) // perpetually re-issue
-		// Poll server health every tick so an externally-killed process is
-		// detected promptly (within ~1 s) even when m.proc == nil.
+
+	case healthTickMsg:
+		// Fire the actual HTTP ping, then re-arm only if still running.
 		if m.runner != nil && m.runner.State() == runner.StateRunning {
 			cmds = append(cmds, m.runner.HealthCheckCmd())
 		}
+		// Always re-arm: if the runner starts up later the ticker is already
+		// running and will catch the transition to Running.
+		cmds = append(cmds, healthTickCmd())
 
 	case runner.HealthCheckMsg:
 		if !msg.OK {
-			// Health check failed — state has already been updated inside
-			// HealthCheckCmd; sync the HUD to reflect the new state.
+			// Health failed — HealthCheckCmd already updated internal state;
+			// sync HUD so the chip turns red immediately.
 			m.syncHUDState()
 		}
 
