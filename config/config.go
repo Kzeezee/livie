@@ -42,10 +42,11 @@ type EndpointSelector struct {
 
 // EndpointConfig describes a single API endpoint (local or remote).
 type EndpointConfig struct {
-	Name    string `toml:"name"`
-	BaseURL string `toml:"base_url"`
-	APIKey  string `toml:"api_key"`
-	Model   string `toml:"model"`
+	Name        string `toml:"name"`
+	BaseURL     string `toml:"base_url"`
+	APIKey      string `toml:"api_key"`
+	Model       string `toml:"model"`
+	ContextSize int    `toml:"context_size"` // 0 = unknown; agent uses defaultMaxTokens
 }
 
 // BehaviourConfig controls tool-use and execution safety.

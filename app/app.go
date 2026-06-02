@@ -4,6 +4,7 @@ package app
 
 import (
 	tea "charm.land/bubbletea/v2"
+	"github.com/kez/livie/agent"
 	"github.com/kez/livie/config"
 	"github.com/kez/livie/runner"
 	"github.com/kez/livie/tui"
@@ -24,6 +25,7 @@ type Model struct {
 	chat    screens.ChatModel
 	cfg     *config.Config
 	runner  *runner.Manager
+	agent   *agent.Agent
 	width   int
 	height  int
 }
@@ -35,7 +37,7 @@ type Model struct {
 //   - the active endpoint is "local" and no model path is configured
 //
 // Otherwise it starts directly at the chat screen.
-func New(cfg *config.Config, mgr *runner.Manager) Model {
+func New(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent) Model {
 	w, h := 120, 36
 
 	startAtSetup := cfg.IsFirstRun ||
@@ -49,9 +51,10 @@ func New(cfg *config.Config, mgr *runner.Manager) Model {
 	return Model{
 		current: current,
 		setup:   screens.NewSetupModel(cfg, mgr, w, h),
-		chat:    screens.NewChatModel(cfg, mgr, w, h),
+		chat:    screens.NewChatModel(cfg, mgr, agt, w, h),
 		cfg:     cfg,
 		runner:  mgr,
+		agent:   agt,
 		width:   w,
 		height:  h,
 	}
@@ -78,7 +81,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.current = screenChat
 		// Re-create the chat model with the final config so the welcome block
 		// reflects any changes made during setup.
-		m.chat = screens.NewChatModel(m.cfg, m.runner, m.width, m.height)
+		m.chat = screens.NewChatModel(m.cfg, m.runner, m.agent, m.width, m.height)
 		return m, m.chat.Init()
 	}
 

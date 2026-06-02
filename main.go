@@ -5,6 +5,7 @@ import (
 	"os"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/kez/livie/agent"
 	"github.com/kez/livie/app"
 	"github.com/kez/livie/config"
 	"github.com/kez/livie/runner"
@@ -19,8 +20,9 @@ func main() {
 	}
 
 	mgr := runner.NewManager(cfg.Runner)
+	agt := agent.New(cfg)
 
-	p := tea.NewProgram(app.New(cfg, mgr))
+	p := tea.NewProgram(app.New(cfg, mgr, agt))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "livie: %v\n", err)
 		os.Exit(1)

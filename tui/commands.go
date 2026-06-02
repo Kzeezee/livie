@@ -31,6 +31,10 @@ const (
 	ActionRunnerStart   // handled by ChatModel.handleAction
 	ActionRunnerStop    // handled by ChatModel.handleAction
 	ActionRunnerRestart // handled by ChatModel.handleAction
+
+	// Phase 6–8 additions:
+	ActionOpenResume    // handled by ChatModel — fires session.ListSummariesCmd
+	ActionResumeSession // handled by ChatModel — loads the selected session
 )
 
 // SubArg describes a named sub-argument for a /command (e.g. "start" for /run).
@@ -278,7 +282,13 @@ func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manag
 
 	r.Register(stub("skills", "List, install, enable or disable skills"))
 	r.Register(stub("usage", "Show token usage and cost estimate for this session"))
-	r.Register(stub("resume", "Resume a previous conversation session"))
+	r.Register(&Command{
+		Name:        "resume",
+		Description: "Resume a previous conversation",
+		Handler: func(args []string) (string, AppAction) {
+			return "", ActionOpenResume
+		},
+	})
 	r.Register(stub("memory", "View or edit Livie's memory files"))
 	r.Register(stub("index", "Manage the local media index"))
 	r.Register(stub("config", "Open the config file in your editor"))

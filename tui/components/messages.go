@@ -22,8 +22,8 @@ const (
 	MsgSystem
 	MsgError
 	MsgCommand
-	msgRaw // pre-rendered block (e.g. welcome screen)
-	// Future: MsgToolCall, MsgStreaming, MsgImage
+	msgRaw      // pre-rendered block (e.g. welcome screen)
+	MsgStreaming // reserved; streaming is handled by the separate streaming fields
 )
 
 // Message is a single entry in the conversation history.
@@ -50,6 +50,11 @@ type MessagesModel struct {
 	height       int
 	atBottom     bool
 	newWhileAway bool // new messages arrived while scrolled up
+
+	// Streaming state — active only during a live LLM response.
+	streaming       bool
+	streamContent   strings.Builder
+	streamStartTime time.Time
 }
 
 // NewMessagesModel creates a new MessagesModel.
@@ -99,6 +104,47 @@ func (m *MessagesModel) SetSize(width, height int) {
 		}
 		m.refresh()
 	}
+}
+
+// StartStreaming opens an in-progress streaming slot rendered at the bottom
+// of the viewport. Must be called on StreamStartMsg.
+func (m *MessagesModel) StartStreaming() {
+	m.streaming = true
+	m.streamContent.Reset()
+	m.streamStartTime = time.Now()
+	m.refresh()
+	m.viewport.GotoBottom()
+	m.atBottom = true
+}
+
+// AppendStream appends a content delta and refreshes the viewport.
+// Called on every StreamChunkMsg.
+func (m *MessagesModel) AppendStream(delta string) {
+	m.streamContent.WriteString(delta)
+	m.refresh()
+	if m.atBottom {
+		m.viewport.GotoBottom()
+	}
+}
+
+// FinalizeStream closes the streaming slot, converts the accumulated content
+// to a permanent MsgAssistant entry, and returns the full content string.
+// Called on StreamDoneMsg, StreamErrMsg, and StreamToolCallMsg.
+func (m *MessagesModel) FinalizeStream() string {
+	content := m.streamContent.String()
+	m.streaming = false
+	m.streamContent.Reset()
+	if content != "" {
+		m.messages = append(m.messages, Message{
+			Type:      MsgAssistant,
+			Content:   content,
+			Timestamp: m.streamStartTime,
+		})
+	}
+	m.refresh()
+	m.viewport.GotoBottom()
+	m.atBottom = true
+	return content
 }
 
 // AddRaw appends a pre-rendered string block directly to the viewport content
@@ -210,7 +256,32 @@ func (m *MessagesModel) refresh() {
 		}
 		sb.WriteString(m.renderMessage(msg))
 	}
+	if m.streaming {
+		if len(m.messages) > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(m.renderStreamingBlock())
+	}
 	m.viewport.SetContent(sb.String())
+}
+
+func (m *MessagesModel) renderStreamingBlock() string {
+	prefix := tui.StyleMsgAssistant.Render("◆ livie")
+	ts := tui.StyleDim.Render("  " + m.streamStartTime.Format("15:04"))
+	header := prefix + ts
+
+	content := m.streamContent.String()
+	cursor := tui.StyleAccentCyan.Render("▌")
+
+	var body string
+	if content == "" {
+		body = "  " + cursor
+	} else {
+		// Append cursor inline before markdown render so it sits at the
+		// correct position within formatted output.
+		body = m.renderMarkdown(content + "▌")
+	}
+	return header + "\n" + body + "\n"
 }
 
 func (m *MessagesModel) renderMessage(msg Message) string {

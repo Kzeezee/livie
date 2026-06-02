@@ -8,10 +8,13 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/kez/livie/agent"
 	"github.com/kez/livie/config"
 	"github.com/kez/livie/runner"
+	"github.com/kez/livie/session"
 	"github.com/kez/livie/tui"
 	"github.com/kez/livie/tui/components"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 // quitConfirmMsg fires when the second ctrl+c window expires.
@@ -30,15 +33,17 @@ var (
 
 // ChatModel is the primary screen — welcome block + chat in one viewport.
 type ChatModel struct {
-	cfg    *config.Config
-	runner *runner.Manager
-	keys   tui.KeyMap
+	cfg      *config.Config
+	runner   *runner.Manager
+	agent    *agent.Agent
+	keys     tui.KeyMap
 	registry *tui.CommandRegistry
 
 	hud          components.HUDState
 	messages     components.MessagesModel
 	input        components.InputModel
 	autocomplete components.AutocompleteModel
+	resumePicker components.SessionPickerModel
 
 	width  int
 	height int
@@ -46,6 +51,9 @@ type ChatModel struct {
 	mode        components.InputMode
 	quitFirst   bool
 	quitFirstAt time.Time
+
+	sessionID        string
+	sessionCreatedAt time.Time
 }
 
 const (
@@ -53,26 +61,28 @@ const (
 	divHeight = 2                    // divider above input + divider above HUD
 )
 
-func NewChatModel(cfg *config.Config, mgr *runner.Manager, width, height int) ChatModel {
+func NewChatModel(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent, width, height int) ChatModel {
 	inputModel := components.NewInputModel(width)
 	vpH := viewportH(height, inputModel.Height(), 0)
 
 	m := ChatModel{
 		cfg:          cfg,
 		runner:       mgr,
+		agent:        agt,
 		keys:         tui.DefaultKeyMap(),
 		registry:     tui.NewCommandRegistry(cfg, mgr),
 		hud:          components.DefaultHUDState(),
 		messages:     components.NewMessagesModel(width, vpH),
 		input:        inputModel,
 		autocomplete: components.NewAutocompleteModel(width),
+		resumePicker: components.NewSessionPickerModel(width),
 		width:        width,
 		height:       height,
 		mode:         components.ModeChat,
 	}
 
 	m.registry.Register(newCmd(m))
-	m.syncHUDRunnerState()
+	m.syncHUDState()
 	m.showWelcome()
 	return m
 }
@@ -126,11 +136,75 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		}
 
 	case hudTickMsg:
-		m.syncHUDRunnerState()
+		m.syncHUDState()
 		cmds = append(cmds, hudTickCmd()) // perpetually re-issue
 
+	case agent.ContextTruncatedMsg:
+		m.messages.AddMessage(components.NewMessage(
+			components.MsgSystem,
+			fmt.Sprintf("context window ~%d%% full — %d older messages trimmed",
+				msg.EstPct, msg.MessagesDropped),
+		))
+		m.messages.GotoBottom()
+		return m, msg.Next()
+
+	case agent.StreamStartMsg:
+		m.messages.StartStreaming()
+		return m, m.agent.PollCmd()
+
+	case agent.StreamChunkMsg:
+		m.messages.AppendStream(msg.Delta)
+		return m, m.agent.PollCmd()
+
+	case agent.StreamDoneMsg:
+		m.messages.FinalizeStream()
+		m.hud.TokensUsed = msg.Usage.TotalTokens
+		m.syncHUDState()
+		m.saveSession()
+		m.messages.GotoBottom()
+
+	case agent.StreamErrMsg:
+		m.messages.FinalizeStream()
+		m.messages.AddMessage(components.NewMessage(
+			components.MsgError,
+			fmt.Sprintf("request failed: %s", msg.Err),
+		))
+		m.messages.GotoBottom()
+
+	case agent.StreamToolCallMsg:
+		m.messages.FinalizeStream()
+		m.messages.AddMessage(components.NewMessage(
+			components.MsgSystem,
+			fmt.Sprintf("[tool call: %s(%s)] — tool execution coming in a future update",
+				msg.Name, msg.Args),
+		))
+		m.messages.GotoBottom()
+
+	case session.SummariesLoadedMsg:
+		if msg.Err != nil {
+			m.messages.AddMessage(components.NewMessage(components.MsgError,
+				fmt.Sprintf("failed to list sessions: %s", msg.Err)))
+			return m, nil
+		}
+		if len(msg.Summaries) == 0 {
+			m.messages.AddMessage(components.NewMessage(components.MsgSystem,
+				"no previous sessions found"))
+			return m, nil
+		}
+		m.resumePicker.SetLoading(false)
+		m.resumePicker.SetSummaries(msg.Summaries)
+		m.syncInputHeight()
+
+	case session.SessionLoadedMsg:
+		if msg.Err != nil {
+			m.messages.AddMessage(components.NewMessage(components.MsgError,
+				fmt.Sprintf("failed to load session: %s", msg.Err)))
+			return m, nil
+		}
+		m.loadSession(msg.Session)
+
 	case runner.RunnerStartedMsg:
-		m.syncHUDRunnerState()
+		m.syncHUDState()
 		if msg.Err != nil {
 			errText := fmt.Sprintf("runner failed to start: %s", msg.Err)
 			if lines := m.runner.LogLines(20); len(lines) > 0 {
@@ -145,7 +219,7 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		m.messages.GotoBottom()
 
 	case runner.RunnerStoppedMsg:
-		m.syncHUDRunnerState()
+		m.syncHUDState()
 		if msg.Err != nil {
 			m.messages.AddMessage(components.NewMessage(
 				components.MsgSystem,
@@ -175,6 +249,26 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 }
 
 func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
+	// ── Resume picker navigation — takes priority over autocomplete ──────────
+	if m.resumePicker.IsVisible() {
+		switch {
+		case key.Matches(msg, m.keys.AutocompleteDown):
+			m.resumePicker.MoveDown()
+			return true, nil
+		case key.Matches(msg, m.keys.AutocompleteUp):
+			m.resumePicker.MoveUp()
+			return true, nil
+		case key.Matches(msg, m.keys.AutocompleteAccept):
+			return true, func() tea.Msg {
+				return tui.CommandActionMsg{Action: tui.ActionResumeSession}
+			}
+		case key.Matches(msg, m.keys.Escape):
+			m.resumePicker.Dismiss()
+			m.syncInputHeight()
+			return true, nil
+		}
+	}
+
 	// ── Autocomplete navigation — intercepted before anything else ───────────
 	if m.autocomplete.IsVisible() {
 		switch {
@@ -215,6 +309,7 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Quit):
 		if m.quitFirst && time.Since(m.quitFirstAt) < 500*time.Millisecond {
+			m.saveSession()
 			return true, tea.Quit
 		}
 		m.quitFirst = true
@@ -265,11 +360,15 @@ func (m *ChatModel) handleSubmit() tea.Cmd {
 		}
 	}
 
-	// Regular message — Phase 2 wires in AI backend
+	// Set session identity on the first user message.
+	if m.sessionID == "" {
+		m.sessionID = time.Now().Format("2006-01-02T15-04-05")
+		m.sessionCreatedAt = time.Now()
+	}
+
 	m.messages.AddMessage(components.NewMessage(components.MsgUser, text))
-	m.messages.AddMessage(components.NewMessage(components.MsgSystem, "AI backend not yet connected"))
 	m.messages.GotoBottom()
-	return nil
+	return m.agent.StreamCmd(text)
 }
 
 func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
@@ -283,9 +382,27 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 		return tea.Quit
 
 	case tui.ActionNew:
+		if m.agent != nil {
+			m.agent.Conversation().Reset()
+		}
+		m.sessionID = ""
+		m.sessionCreatedAt = time.Time{}
 		vpH := viewportH(m.height, m.input.Height(), 0)
 		m.messages = components.NewMessagesModel(m.width, vpH)
 		m.showWelcome()
+
+	case tui.ActionOpenResume:
+		m.resumePicker = components.NewSessionPickerModel(m.width)
+		m.resumePicker.SetLoading(true)
+		m.syncInputHeight()
+		return session.ListSummariesCmd()
+
+	case tui.ActionResumeSession:
+		if sel := m.resumePicker.Selected(); sel != nil {
+			m.resumePicker.Dismiss()
+			m.syncInputHeight()
+			return session.LoadCmd(sel.ID)
+		}
 
 	case tui.ActionSetModeChat:
 		m.setMode(components.ModeChat)
@@ -312,9 +429,10 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 	return nil
 }
 
-// syncHUDRunnerState reads the runner's current state and maps it to the HUD fields.
+// syncHUDState refreshes all HUD fields: model name, endpoint, token max,
+// and runner chip. Renamed from syncHUDRunnerState to reflect its broader scope.
 // No I/O — Manager.State() is a mutex-guarded field read.
-func (m *ChatModel) syncHUDRunnerState() {
+func (m *ChatModel) syncHUDState() {
 	if m.runner == nil {
 		m.hud.RunnerStatus = components.RunnerStatusNone
 		m.hud.RunnerLabel = ""
@@ -342,6 +460,108 @@ func (m *ChatModel) syncHUDRunnerState() {
 		m.hud.RunnerStatus = components.RunnerStatusNone
 		m.hud.RunnerLabel = ""
 	}
+
+	// ── Model name ────────────────────────────────────────────────────────────
+	if m.cfg.Endpoint.Active == "local" {
+		m.hud.ModelName = m.cfg.ModelName()
+	} else {
+		ep := m.cfg.ActiveEndpoint()
+		m.hud.ModelName = ep.Model
+		if m.hud.ModelName == "" {
+			m.hud.ModelName = "(no model)"
+		}
+	}
+
+	// ── Endpoint name ─────────────────────────────────────────────────────────
+	m.hud.EndpointName = m.cfg.Endpoint.Active
+
+	// ── Context window max ────────────────────────────────────────────────────
+	ep := m.cfg.ActiveEndpoint()
+	if ep.ContextSize > 0 {
+		m.hud.TokensMax = ep.ContextSize
+	} else if m.cfg.Endpoint.Active == "local" {
+		m.hud.TokensMax = m.cfg.Runner.ContextSize
+	} else {
+		m.hud.TokensMax = 0
+	}
+}
+
+// saveSession persists the current conversation to disk.
+// Best-effort — errors are silently dropped.
+func (m *ChatModel) saveSession() {
+	s := m.buildSessionSnapshot()
+	if s == nil {
+		return
+	}
+	_ = session.Save(s)
+}
+
+func (m *ChatModel) buildSessionSnapshot() *session.Session {
+	if m.sessionID == "" || m.agent == nil {
+		return nil
+	}
+	hist := m.agent.Conversation().History()
+	if len(hist) == 0 {
+		return nil
+	}
+	ep := m.cfg.ActiveEndpoint()
+	msgs := make([]session.Message, 0, len(hist))
+	for _, h := range hist {
+		msgs = append(msgs, session.Message{
+			Role:      session.Role(h.Role),
+			Content:   h.Content,
+			Timestamp: time.Now(),
+		})
+	}
+	return &session.Session{
+		ID:           m.sessionID,
+		CreatedAt:    m.sessionCreatedAt,
+		UpdatedAt:    time.Now(),
+		EndpointName: ep.Name,
+		ModelName:    ep.Model,
+		Messages:     msgs,
+		TokensUsed:   m.hud.TokensUsed,
+	}
+}
+
+func (m *ChatModel) loadSession(s *session.Session) {
+	// Convert session messages to openai format.
+	history := make([]openai.ChatCompletionMessage, 0, len(s.Messages))
+	for _, sm := range s.Messages {
+		history = append(history, openai.ChatCompletionMessage{
+			Role:    string(sm.Role),
+			Content: sm.Content,
+		})
+	}
+	if m.agent != nil {
+		m.agent.Conversation().LoadHistory(history)
+	}
+
+	// Restore session identity so subsequent saves update the same file.
+	m.sessionID = s.ID
+	m.sessionCreatedAt = s.CreatedAt
+
+	// Rebuild TUI message list from session history.
+	vpH := viewportH(m.height, m.input.Height(), 0)
+	m.messages = components.NewMessagesModel(m.width, vpH)
+	m.showWelcome()
+	for _, sm := range s.Messages {
+		var t components.MsgType
+		switch sm.Role {
+		case session.RoleUser:
+			t = components.MsgUser
+		case session.RoleAssistant:
+			t = components.MsgAssistant
+		default:
+			t = components.MsgSystem
+		}
+		m.messages.AddMessage(components.NewMessage(t, sm.Content))
+	}
+	m.messages.GotoBottom()
+	m.messages.AddMessage(components.NewMessage(
+		components.MsgSystem,
+		fmt.Sprintf("session resumed · %s · %d messages", s.ID, len(s.Messages)),
+	))
 }
 
 func (m *ChatModel) setMode(mode components.InputMode) {
@@ -356,7 +576,11 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 // SetSize is skipped when dimensions are unchanged to avoid expensive re-renders.
 func (m *ChatModel) syncInputHeight() {
 	m.autocomplete.SetInput(m.input.Value(), m.registry)
-	newH := viewportH(m.height, m.input.Height(), m.autocomplete.Height())
+	overlayH := m.autocomplete.Height()
+	if m.resumePicker.IsVisible() {
+		overlayH = m.resumePicker.Height()
+	}
+	newH := viewportH(m.height, m.input.Height(), overlayH)
 	if m.width != m.messages.Width() || newH != m.messages.Height() {
 		m.messages.SetSize(m.width, newH)
 	}
@@ -381,7 +605,9 @@ func (m ChatModel) View() tea.View {
 		topDivider,
 		m.input.View(),
 	}
-	if m.autocomplete.IsVisible() {
+	if m.resumePicker.IsVisible() {
+		parts = append(parts, m.resumePicker.View())
+	} else if m.autocomplete.IsVisible() {
 		parts = append(parts, m.autocomplete.View())
 	}
 	parts = append(parts, bottomDivider, hud)
