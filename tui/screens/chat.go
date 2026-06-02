@@ -138,6 +138,18 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 	case hudTickMsg:
 		m.syncHUDState()
 		cmds = append(cmds, hudTickCmd()) // perpetually re-issue
+		// Poll server health every tick so an externally-killed process is
+		// detected promptly (within ~1 s) even when m.proc == nil.
+		if m.runner != nil && m.runner.State() == runner.StateRunning {
+			cmds = append(cmds, m.runner.HealthCheckCmd())
+		}
+
+	case runner.HealthCheckMsg:
+		if !msg.OK {
+			// Health check failed — state has already been updated inside
+			// HealthCheckCmd; sync the HUD to reflect the new state.
+			m.syncHUDState()
+		}
 
 	case agent.ContextTruncatedMsg:
 		m.messages.AddMessage(components.NewMessage(

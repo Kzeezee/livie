@@ -165,14 +165,21 @@ func (m *Manager) StopCmd() tea.Cmd {
 }
 
 // HealthCheckCmd performs a single GET /health and returns a HealthCheckMsg.
+// When health fails while the manager believes the server is running (e.g. an
+// externally-adopted process that was killed), the state is updated to StateError
+// so the HUD reflects reality without waiting for a process-exit signal.
 func (m *Manager) HealthCheckCmd() tea.Cmd {
 	return func() tea.Msg {
 		ok, err := m.healthCheck()
+		m.mu.Lock()
 		if ok {
-			m.mu.Lock()
 			m.markRunningLocked()
-			m.mu.Unlock()
+		} else if m.state == StateRunning {
+			// Server was running but is no longer reachable — mark as error.
+			m.state = StateError
+			m.startedAt = time.Time{}
 		}
+		m.mu.Unlock()
 		return HealthCheckMsg{OK: ok, Err: err}
 	}
 }
