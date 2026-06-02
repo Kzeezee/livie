@@ -53,7 +53,7 @@ type MessagesModel struct {
 
 	// Streaming state — active only during a live LLM response.
 	streaming       bool
-	streamContent   strings.Builder
+	streamContent   *strings.Builder // pointer avoids panic on value-copy
 	streamStartTime time.Time
 }
 
@@ -110,7 +110,7 @@ func (m *MessagesModel) SetSize(width, height int) {
 // of the viewport. Must be called on StreamStartMsg.
 func (m *MessagesModel) StartStreaming() {
 	m.streaming = true
-	m.streamContent.Reset()
+	m.streamContent = &strings.Builder{}
 	m.streamStartTime = time.Now()
 	m.refresh()
 	m.viewport.GotoBottom()
@@ -120,6 +120,9 @@ func (m *MessagesModel) StartStreaming() {
 // AppendStream appends a content delta and refreshes the viewport.
 // Called on every StreamChunkMsg.
 func (m *MessagesModel) AppendStream(delta string) {
+	if m.streamContent == nil {
+		m.streamContent = &strings.Builder{}
+	}
 	m.streamContent.WriteString(delta)
 	m.refresh()
 	if m.atBottom {
@@ -131,9 +134,12 @@ func (m *MessagesModel) AppendStream(delta string) {
 // to a permanent MsgAssistant entry, and returns the full content string.
 // Called on StreamDoneMsg, StreamErrMsg, and StreamToolCallMsg.
 func (m *MessagesModel) FinalizeStream() string {
-	content := m.streamContent.String()
+	var content string
+	if m.streamContent != nil {
+		content = m.streamContent.String()
+	}
 	m.streaming = false
-	m.streamContent.Reset()
+	m.streamContent = nil
 	if content != "" {
 		m.messages = append(m.messages, Message{
 			Type:      MsgAssistant,
@@ -270,7 +276,10 @@ func (m *MessagesModel) renderStreamingBlock() string {
 	ts := tui.StyleDim.Render("  " + m.streamStartTime.Format("15:04"))
 	header := prefix + ts
 
-	content := m.streamContent.String()
+	var content string
+	if m.streamContent != nil {
+		content = m.streamContent.String()
+	}
 	cursor := tui.StyleAccentCyan.Render("▌")
 
 	var body string
