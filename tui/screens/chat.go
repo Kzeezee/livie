@@ -553,7 +553,7 @@ func (m *ChatModel) buildSessionSnapshot() *session.Session {
 		CreatedAt:    m.sessionCreatedAt,
 		UpdatedAt:    time.Now(),
 		EndpointName: ep.Name,
-		ModelName:    ep.Model,
+		ModelName:    m.hud.ModelName,
 		Messages:     msgs,
 		TokensUsed:   m.hud.TokensUsed,
 	}
