@@ -86,8 +86,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// ── Global quit ────────────────────────────────────────────────────────────
-	if k, ok := msg.(tea.KeyPressMsg); ok && k.String() == "ctrl+c" {
-		return m, tea.Quit
+	if k, ok := msg.(tea.KeyPressMsg); ok {
+		if k.String() == "ctrl+c" || k.String() == "ctrl+q" {
+			return m, tui.QuitCmd()
+		}
 	}
 
 	// ── Propagate resize to all screens ─────────────────────────────────────

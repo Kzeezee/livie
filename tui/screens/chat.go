@@ -342,10 +342,15 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 		m.input.InsertNewline()
 		return true, nil
 
+	case key.Matches(msg, m.keys.QuitAlt):
+		// ctrl+q: single-press clean quit.
+		m.saveSession()
+		return true, tui.QuitCmd()
+
 	case key.Matches(msg, m.keys.Quit):
 		if m.quitFirst && time.Since(m.quitFirstAt) < 500*time.Millisecond {
 			m.saveSession()
-			return true, tea.Quit
+			return true, tui.QuitCmd()
 		}
 		m.quitFirst = true
 		m.quitFirstAt = time.Now()
@@ -375,6 +380,34 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Submit):
 		return true, m.handleSubmit()
+
+	case key.Matches(msg, m.keys.ScrollUp):
+		m.messages.ScrollUp()
+		return true, nil
+
+	case key.Matches(msg, m.keys.ScrollDown):
+		m.messages.ScrollDown()
+		return true, nil
+
+	case key.Matches(msg, m.keys.ScrollTop):
+		m.messages.GotoTop()
+		return true, nil
+
+	case key.Matches(msg, m.keys.ScrollBot):
+		m.messages.GotoBottom()
+		return true, nil
+
+	case key.Matches(msg, m.keys.CopyResponse):
+		// OSC 52: copy the last assistant response to the system clipboard.
+		// Supported by Kitty, WezTerm, Alacritty, and most modern terminals.
+		if content := m.messages.LastAssistantContent(); content != "" {
+			m.messages.AddMessage(components.NewMessage(
+				components.MsgSystem, "last response copied to clipboard",
+			))
+			m.messages.GotoBottom()
+			return true, tea.SetClipboard(content)
+		}
+		return true, nil
 	}
 
 	return false, nil
@@ -650,7 +683,15 @@ func (m ChatModel) View() tea.View {
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	v := tea.NewView(content)
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	// MouseMode is intentionally left as MouseModeNone (the zero value).
+	//
+	// Any mouse tracking mode (1000/1002/1003) puts the terminal into
+	// "grabbed" state, which routes button-press events to the app and
+	// prevents the terminal from performing native click-drag text
+	// selection. Kitty's mouse_map confirms this: plain left-press
+	// selection only fires in "ungrabbed" state.
+	//
+	// Scroll-wheel is handled via keyboard: PageUp / PageDown.
 	return v
 }
 

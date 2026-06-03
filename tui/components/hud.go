@@ -109,8 +109,16 @@ func RenderHUD(state HUDState, width int) string {
 	}
 	row2Content := chipStr + statsLeft + strings.Repeat(" ", pad2) + statsRight
 
-	// ── Row 3: ✓/✗ status ────────────────────────────────────────────────────
-	row3Content := renderStatusLine(state.StatusMsg, state.StatusOK)
+	// ── Row 3: ✓/✗ status (left)  key hints (right) ─────────────────────────
+	statusStr := renderStatusLine(state.StatusMsg, state.StatusOK)
+	hintsStr := tui.StyleMuted.Render("pgup/pgdn scroll · ctrl+y copy · ctrl+q quit")
+	sw3 := lipgloss.Width(statusStr)
+	hw3 := lipgloss.Width(hintsStr)
+	pad3 := inner - sw3 - hw3
+	if pad3 < 1 {
+		pad3 = 1
+	}
+	row3Content := statusStr + strings.Repeat(" ", pad3) + hintsStr
 
 	// ── Render each row with surface background ───────────────────────────────
 	style := tui.StyleHUD.Width(width)

@@ -217,6 +217,18 @@ func (m MessagesModel) Width() int { return m.width }
 // Height returns the current viewport height.
 func (m MessagesModel) Height() int { return m.height }
 
+// LastAssistantContent returns the plain-text content of the most recent
+// MsgAssistant message, or "" if no assistant message exists yet.
+// Used by the ctrl+y OSC 52 clipboard copy shortcut.
+func (m *MessagesModel) LastAssistantContent() string {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].Type == MsgAssistant {
+			return m.messages[i].Content
+		}
+	}
+	return ""
+}
+
 // GotoTop scrolls to the top.
 func (m *MessagesModel) GotoTop() {
 	m.viewport.GotoTop()

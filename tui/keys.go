@@ -1,6 +1,16 @@
 package tui
 
-import "charm.land/bubbles/v2/key"
+import (
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+)
+
+// QuitCmd returns a tea.Cmd that quits the program.
+// Centralised here so all quit paths go through one place, making it
+// easy to add cleanup (e.g. state persistence) in the future.
+func QuitCmd() tea.Cmd {
+	return tea.Quit
+}
 
 // KeyMap holds all keybindings for the application.
 type KeyMap struct {
@@ -8,10 +18,16 @@ type KeyMap struct {
 	Submit             key.Binding
 	ClearInput         key.Binding
 	Quit               key.Binding
+	QuitAlt            key.Binding
 	Escape             key.Binding
 	AutocompleteAccept key.Binding
 	AutocompleteUp     key.Binding
 	AutocompleteDown   key.Binding
+	ScrollUp           key.Binding
+	ScrollDown         key.Binding
+	ScrollTop          key.Binding
+	ScrollBot          key.Binding
+	CopyResponse       key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings.
@@ -33,6 +49,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+c"),
 			key.WithHelp("ctrl+c", "quit"),
 		),
+		QuitAlt: key.NewBinding(
+			key.WithKeys("ctrl+q"),
+			key.WithHelp("ctrl+q", "quit"),
+		),
 		Escape: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "cancel / chat mode"),
@@ -48,6 +68,26 @@ func DefaultKeyMap() KeyMap {
 		AutocompleteDown: key.NewBinding(
 			key.WithKeys("down"),
 			key.WithHelp("↓", "suggestion down"),
+		),
+		ScrollUp: key.NewBinding(
+			key.WithKeys("pgup"),
+			key.WithHelp("pgup", "scroll up"),
+		),
+		ScrollDown: key.NewBinding(
+			key.WithKeys("pgdown"),
+			key.WithHelp("pgdn", "scroll down"),
+		),
+		ScrollTop: key.NewBinding(
+			key.WithKeys("ctrl+home"),
+			key.WithHelp("ctrl+home", "scroll to top"),
+		),
+		ScrollBot: key.NewBinding(
+			key.WithKeys("ctrl+end"),
+			key.WithHelp("ctrl+end", "scroll to bottom"),
+		),
+		CopyResponse: key.NewBinding(
+			key.WithKeys("ctrl+y"),
+			key.WithHelp("ctrl+y", "copy last response"),
 		),
 	}
 }
