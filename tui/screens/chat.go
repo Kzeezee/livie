@@ -293,7 +293,7 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 		case key.Matches(msg, m.keys.AutocompleteUp):
 			m.resumePicker.MoveUp()
 			return true, nil
-		case key.Matches(msg, m.keys.AutocompleteAccept):
+		case key.Matches(msg, m.keys.AutocompleteAccept), key.Matches(msg, m.keys.Submit):
 			return true, func() tea.Msg {
 				return tui.CommandActionMsg{Action: tui.ActionResumeSession}
 			}
