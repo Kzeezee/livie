@@ -53,6 +53,33 @@ func (c *Conversation) AddAssistant(content string) {
 	})
 }
 
+// AddToolCall records the assistant's tool call in history.
+// Must be called before dispatching so the API receives the correct message order:
+// assistant(tool_calls) → tool(result).
+func (c *Conversation) AddToolCall(id, name, args string) {
+	c.history = append(c.history, openai.ChatCompletionMessage{
+		Role: openai.ChatMessageRoleAssistant,
+		ToolCalls: []openai.ToolCall{{
+			ID:   id,
+			Type: openai.ToolTypeFunction,
+			Function: openai.FunctionCall{
+				Name:      name,
+				Arguments: args,
+			},
+		}},
+	})
+}
+
+// AddToolResult records the tool's response in history.
+// Called by ContinueAfterToolCmd after execution (success or error).
+func (c *Conversation) AddToolResult(toolCallID, content string) {
+	c.history = append(c.history, openai.ChatCompletionMessage{
+		Role:       openai.ChatMessageRoleTool,
+		ToolCallID: toolCallID,
+		Content:    content,
+	})
+}
+
 // BuildMessages returns the API message slice and, when truncation was needed,
 // a *truncatedWarning (otherwise nil).
 //
@@ -60,13 +87,24 @@ func (c *Conversation) AddAssistant(content string) {
 // Truncation removes the oldest user+assistant pairs (always in pairs to
 // preserve conversational coherence) until the estimated token count drops
 // below truncationWarnPct % of maxTokens.
+// msgTokens estimates the token count for a history message.
+// Tool-call messages have empty Content but non-empty Arguments, so we also
+// count the arguments string to avoid under-counting context usage.
+func msgTokens(m openai.ChatCompletionMessage) int {
+	n := estimateTokens(m.Content)
+	for _, tc := range m.ToolCalls {
+		n += estimateTokens(tc.Function.Arguments)
+	}
+	return n
+}
+
 func (c *Conversation) BuildMessages() ([]openai.ChatCompletionMessage, *truncatedWarning) {
 	threshold := c.maxTokens * truncationWarnPct / 100
 
 	sysTokens := estimateTokens(c.systemPrompt)
 	total := sysTokens
 	for _, m := range c.history {
-		total += estimateTokens(m.Content)
+		total += msgTokens(m)
 	}
 
 	if total <= threshold {
@@ -87,7 +125,7 @@ func (c *Conversation) BuildMessages() ([]openai.ChatCompletionMessage, *truncat
 	for total > threshold && len(hist) >= 2 {
 		// Drop the oldest pair
 		pair := hist[:2]
-		total -= estimateTokens(pair[0].Content) + estimateTokens(pair[1].Content)
+		total -= msgTokens(pair[0]) + msgTokens(pair[1])
 		hist = hist[2:]
 		dropped += 2
 	}
@@ -95,7 +133,7 @@ func (c *Conversation) BuildMessages() ([]openai.ChatCompletionMessage, *truncat
 	// Compute the pre-truncation percentage
 	origTotal := sysTokens
 	for _, m := range c.history {
-		origTotal += estimateTokens(m.Content)
+		origTotal += msgTokens(m)
 	}
 	estPct := origTotal * 100 / c.maxTokens
 

@@ -1,6 +1,10 @@
 package agent
 
-import tea "charm.land/bubbletea/v2"
+import (
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+)
 
 // StreamStartMsg fires once when the HTTP connection is established and the
 // stream begins. Signals the TUI to open a streaming message slot.
@@ -24,11 +28,22 @@ type StreamErrMsg struct {
 }
 
 // StreamToolCallMsg fires when the model requests a tool call
-// (finish_reason = tool_calls). Phase 6: no tools are executed —
-// ChatModel renders this as an informational system message.
+// (finish_reason = tool_calls). The TUI either auto-dispatches or prompts
+// the user for confirmation depending on cfg.ConfirmToolCalls.
 type StreamToolCallMsg struct {
+	ID   string // tool_call_id from the API
 	Name string
 	Args string // raw JSON arguments string
+}
+
+// ToolResultMsg is returned by agent.DispatchToolCmd after a tool executes.
+type ToolResultMsg struct {
+	ID      string
+	Name    string
+	Args    string        // raw JSON (for display)
+	Result  string        // string result injected into context
+	Elapsed time.Duration
+	Err     error         // non-nil = execution error (result still injected)
 }
 
 // ContextTruncatedMsg fires before the stream starts when the conversation

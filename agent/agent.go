@@ -5,24 +5,39 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/kez/livie/config"
 	openai "github.com/sashabaranov/go-openai"
 )
 
+// pendingToolCall accumulates streamed tool-call fields across multiple chunks.
+// The OpenAI API streams id/name/arguments across many deltas; we must
+// concatenate them before dispatching.
+type pendingToolCall struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
 // Agent drives the LLM request–response cycle and owns conversation history.
 type Agent struct {
 	cfg   *config.Config
 	conv  *Conversation
 	tools *ToolDispatcher
+	cwd   string // working directory fixed at launch
 
 	// Active stream state — non-nil only during a streaming response.
 	activeStream *openai.ChatCompletionStream
 	streamBuf    strings.Builder
 	lastUsage    *openai.Usage // populated when the final chunk includes usage
+
+	// Tool call accumulator — cleared after each tool_calls finish_reason.
+	pendingTool pendingToolCall
 }
 
 // New creates a new Agent from the given config.
@@ -31,11 +46,25 @@ func New(cfg *config.Config) *Agent {
 		filepath.Join(cfg.Paths.Vault, "system_prompt.md"),
 	)
 	maxTok := contextLimit(cfg)
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "." // fallback — should never fail in practice
+	}
+	d := NewToolDispatcher()
+	RegisterBuiltins(d, cwd)
 	return &Agent{
 		cfg:   cfg,
 		conv:  NewConversation(sysprompt, maxTok),
-		tools: NewToolDispatcher(),
+		tools: d,
+		cwd:   cwd,
 	}
+}
+
+// resetPendingTool clears the tool call accumulator after each dispatch.
+func (a *Agent) resetPendingTool() {
+	a.pendingTool.id = ""
+	a.pendingTool.name = ""
+	a.pendingTool.args.Reset()
 }
 
 // contextLimit resolves the effective context window size from config.
@@ -143,11 +172,25 @@ func (a *Agent) PollCmd() tea.Cmd {
 
 		choice := resp.Choices[0]
 
+		// Accumulate tool call fields streamed across multiple chunks.
+		for _, tc := range choice.Delta.ToolCalls {
+			if tc.ID != "" {
+				a.pendingTool.id = tc.ID
+			}
+			if tc.Function.Name != "" {
+				a.pendingTool.name = tc.Function.Name
+			}
+			a.pendingTool.args.WriteString(tc.Function.Arguments)
+		}
+
 		if choice.FinishReason == openai.FinishReasonToolCalls {
-			// Phase 6 scaffold: extract whatever tool name has accumulated.
-			name, args := a.extractToolCall(choice)
+			id := a.pendingTool.id
+			name := a.pendingTool.name
+			args := a.pendingTool.args.String()
+			a.conv.AddToolCall(id, name, args)
 			a.closeStream()
-			return StreamToolCallMsg{Name: name, Args: args}
+			a.resetPendingTool()
+			return StreamToolCallMsg{ID: id, Name: name, Args: args}
 		}
 
 		delta := choice.Delta.Content
@@ -175,24 +218,48 @@ func (a *Agent) snapshotUsage() UsageSnapshot {
 	}
 }
 
-// extractToolCall returns a best-effort name and args from the current stream
-// buffer for Phase 6 display purposes. Full tool call accumulation is out of
-// scope for this phase.
-func (a *Agent) extractToolCall(choice openai.ChatCompletionStreamChoice) (name, args string) {
-	if len(choice.Delta.ToolCalls) > 0 {
-		tc := choice.Delta.ToolCalls[0]
-		if tc.Function.Name != "" {
-			name = tc.Function.Name
+// DispatchToolCmd executes the named tool and returns ToolResultMsg.
+// Runs in a Bubbletea goroutine — safe to call concurrently.
+func (a *Agent) DispatchToolCmd(id, name, args string) tea.Cmd {
+	return func() tea.Msg {
+		start := time.Now()
+		result, err := a.tools.Dispatch(name, args)
+		elapsed := time.Since(start)
+		if err != nil {
+			result = fmt.Sprintf("error: %s", err)
 		}
-		if tc.Function.Arguments != "" {
-			args = tc.Function.Arguments
+		return ToolResultMsg{
+			ID:      id,
+			Name:    name,
+			Args:    args,
+			Result:  result,
+			Elapsed: elapsed,
+			Err:     err,
 		}
 	}
-	if name == "" {
-		name = "(unknown)"
+}
+
+// ContinueAfterToolCmd injects the tool result into conversation history
+// and restarts the stream. Mirrors StreamCmd's truncation handling.
+func (a *Agent) ContinueAfterToolCmd(id, result string) tea.Cmd {
+	return func() tea.Msg {
+		a.conv.AddToolResult(id, result)
+		msgs, truncated := a.conv.BuildMessages()
+		ep := a.cfg.ActiveEndpoint()
+		startCmd := a.streamStartCmd(msgs, ep)
+		if truncated != nil {
+			return ContextTruncatedMsg{
+				MessagesDropped: truncated.MessagesDropped,
+				EstPct:          truncated.EstPct,
+				next:            startCmd,
+			}
+		}
+		return startCmd()
 	}
-	if args == "" {
-		args = "{}"
-	}
-	return
+}
+
+// RejectToolCmd injects a rejection notice and restarts the stream so the
+// model can respond knowing the tool was declined.
+func (a *Agent) RejectToolCmd(id string) tea.Cmd {
+	return a.ContinueAfterToolCmd(id, "tool call rejected by user")
 }
