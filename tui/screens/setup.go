@@ -108,26 +108,48 @@ type SetupModel struct {
 
 	// Inline error message shown on config form steps.
 	errMsg string
+
+	// restoredGPUBackend holds the backend name saved in setup state so it can
+	// be matched against availableBackends once the async detect completes.
+	restoredGPUBackend string
+
+	// downloadResuming is true when startDownload detects a cached partial file.
+	downloadResuming bool
 }
 
 // NewSetupModel creates the setup wizard, pre-populated with existing config values.
+// If a setup state file exists on disk the wizard is restored to the furthest
+// step reached, skipping detection and download steps already completed.
 func NewSetupModel(cfg *config.Config, mgr *runner.Manager, width, height int) SetupModel {
-	return SetupModel{
+	m := SetupModel{
 		width:  width,
 		height: height,
 		cfg:    cfg,
 		runner: mgr,
 		step:   stepBoot,
 	}
+	return m.restoreState()
 }
 
 func (m SetupModel) Init() tea.Cmd {
-	return tea.Batch(
-		spinnerTickCmd(),
-		tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
+	cmds := []tea.Cmd{spinnerTickCmd()}
+	switch m.step {
+	case stepBoot:
+		// Normal first-run path: short delay then advance to detection.
+		cmds = append(cmds, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg {
 			return setupAdvanceMsg{}
-		}),
-	)
+		}))
+	case stepGPUSelect:
+		// Restored to GPU select — re-detect available backends asynchronously.
+		cmds = append(cmds, detectAvailableCmd())
+	case stepConfigLocal:
+		// Restored to local config form — re-fire focus cmd for cursor blink.
+		cmds = append(cmds, m.localInputs[m.localFocus].Focus())
+	case stepConfigRemote:
+		// Restored to remote config form — re-fire focus cmd for cursor blink.
+		cmds = append(cmds, m.remoteInputs[m.remoteFocus].Focus())
+	}
+	return tea.Batch(cmds...)
 }
 
 // ── update ────────────────────────────────────────────────────────────────
@@ -151,6 +173,7 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 			m.step = stepDetecting
 			cmds = append(cmds, detectCmd(m.cfg.Runner))
 		case stepDone:
+			runner.DeleteSetupState()
 			return m, func() tea.Msg { return TransitionToChat{Config: m.cfg} }
 		}
 
@@ -164,9 +187,26 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 		}
 		m.step = stepInstallPrompt
 		m.installChoice = 0
+		// Persist detection result so a restart skips this scan.
+		runner.SaveSetupState(&runner.SetupState{
+			Step:            "install_prompt",
+			LlamaInstalled:  m.llamaInstalled,
+			DetectedBinPath: m.detectedBinPath,
+		})
 
 	case detectAvailableMsg:
 		m.availableBackends = msg.backends
+		// When restoring from a previous session, find the previously chosen
+		// backend by name so the user doesn't have to re-select it.
+		if m.restoredGPUBackend != "" {
+			for i, b := range m.availableBackends {
+				if b.String() == m.restoredGPUBackend {
+					m.gpuChoice = i
+					break
+				}
+			}
+			m.restoredGPUBackend = ""
+		}
 
 	case runner.DownloadProgressMsg:
 		m.downloadedBytes = msg.Downloaded
@@ -181,6 +221,13 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 				m.runner.SetBinaryPath(msg.BinaryPath)
 				m.detectedBinPath = msg.BinaryPath
 				m = m.enterModeSelect(0)
+				// Download complete — save state so a crash here continues from
+				// mode selection rather than re-downloading.
+				runner.SaveSetupState(&runner.SetupState{
+					Step:            "mode_select",
+					LlamaInstalled:  true,
+					DetectedBinPath: msg.BinaryPath,
+				})
 			}
 		} else {
 			cmds = append(cmds, runner.DownloadProgressCmd(m.downloadCh))
@@ -229,14 +276,34 @@ func (m SetupModel) handleKey(msg tea.KeyPressMsg) (SetupModel, tea.Cmd) {
 		case "enter":
 			if m.llamaInstalled {
 				if m.installChoice == 0 {
-					return m.enterModeSelect(0), nil // Continue
+					m2 := m.enterModeSelect(0)
+					runner.SaveSetupState(&runner.SetupState{
+						Step: "mode_select", LlamaInstalled: m2.llamaInstalled,
+						DetectedBinPath: m2.detectedBinPath,
+					})
+					return m2, nil
 				}
-				return m.enterGPUSelect() // Wipe & reinstall
+				m2, cmd := m.enterGPUSelect() // Wipe & reinstall
+				runner.SaveSetupState(&runner.SetupState{
+					Step: "gpu_select", LlamaInstalled: m2.llamaInstalled,
+					DetectedBinPath: m2.detectedBinPath,
+				})
+				return m2, cmd
 			}
 			if m.installChoice == 0 {
-				return m.enterGPUSelect() // Install
+				m2, cmd := m.enterGPUSelect() // Install
+				runner.SaveSetupState(&runner.SetupState{
+					Step: "gpu_select", LlamaInstalled: m2.llamaInstalled,
+					DetectedBinPath: m2.detectedBinPath,
+				})
+				return m2, cmd
 			}
-			return m.enterModeSelect(1), nil // Skip
+			m2 := m.enterModeSelect(1) // Skip install
+			runner.SaveSetupState(&runner.SetupState{
+				Step: "mode_select", LlamaInstalled: m2.llamaInstalled,
+				Mode: "remote",
+			})
+			return m2, nil
 		case "esc":
 			if m.llamaInstalled {
 				return m.enterModeSelect(0), nil
@@ -297,10 +364,22 @@ func (m SetupModel) handleKey(msg tea.KeyPressMsg) (SetupModel, tea.Cmd) {
 			if m.modeChoice == 0 {
 				m.step = stepConfigLocal
 				m = m.initLocalInputs()
+				runner.SaveSetupState(&runner.SetupState{
+					Step: "config_local", LlamaInstalled: m.llamaInstalled,
+					DetectedBinPath: m.detectedBinPath, Mode: "local",
+					ModelPath: m.cfg.Runner.ModelPath, GPULayers: m.cfg.Runner.GPULayers,
+					ContextSize: m.cfg.Runner.ContextSize, Port: m.cfg.Runner.Port,
+				})
 				return m.refocusLocal()
 			}
 			m.step = stepConfigRemote
 			m = m.initRemoteInputs()
+			active := m.cfg.ActiveEndpoint()
+			runner.SaveSetupState(&runner.SetupState{
+				Step: "config_remote", LlamaInstalled: m.llamaInstalled,
+				DetectedBinPath: m.detectedBinPath, Mode: "remote",
+				BaseURL: active.BaseURL, APIKey: active.APIKey, Model: active.Model,
+			})
 			return m.refocusRemote()
 		}
 
@@ -404,20 +483,33 @@ func (m SetupModel) enterGPUSelect() (SetupModel, tea.Cmd) {
 	return m, detectAvailableCmd()
 }
 
-// startDownload transitions to stepInstalling, resets progress counters, and
-// fires the download pipeline. The context lives only inside the goroutine
-// closure — it does not need to be stored on the model.
+// startDownload transitions to stepInstalling, pre-populates progress counters
+// from any cached partial download, and fires the download pipeline.
+// The context lives only inside the goroutine closure.
 func (m SetupModel) startDownload() (SetupModel, tea.Cmd) {
 	var gpu runner.GPUBackend
 	if len(m.availableBackends) > m.gpuChoice {
 		gpu = m.availableBackends[m.gpuChoice]
 	}
 
-	m.downloadedBytes = 0
-	m.downloadTotal = 0
+	// Pre-populate progress from any cached partial archive so the bar is
+	// non-zero from the first frame instead of jumping after the first chunk.
+	downloaded, total := runner.ResumeBytes()
+	m.downloadedBytes = downloaded
+	m.downloadTotal = total
+	m.downloadResuming = downloaded > 0
 	m.downloadErr = nil
 	m.errMsg = ""
 	m.step = stepInstalling
+
+	// Persist that a download is in progress so a restart returns to GPU
+	// select (the part file provides actual resume data to the goroutine).
+	runner.SaveSetupState(&runner.SetupState{
+		Step:            "downloading",
+		LlamaInstalled:  m.llamaInstalled,
+		DetectedBinPath: m.detectedBinPath,
+		GPUBackend:      gpu.String(),
+	})
 
 	ch := runner.StartDownload(context.Background(), runner.New(gpu), runner.DataDirBinDir())
 	m.downloadCh = ch
@@ -745,8 +837,14 @@ func (m SetupModel) renderInstalling() string {
 	platform := runner.New(gpu)
 
 	arrow := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentCyan)).Render("↓")
+	headingText := fmt.Sprintf("  Downloading llama-server  (%s)", platform.Description())
+	if m.downloadResuming {
+		headingText += lipgloss.NewStyle().
+			Foreground(lipgloss.Color(tui.ColTextMuted)).
+			Render("  resuming")
+	}
 	heading := arrow + lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextPrimary)).Bold(true).
-		Render(fmt.Sprintf("  Downloading llama-server  (%s)", platform.Description()))
+		Render(headingText)
 
 	bar := renderProgressBar(m.downloadedBytes, m.downloadTotal, 34)
 	pct := ""
@@ -953,6 +1051,109 @@ func (m SetupModel) renderDone() string {
 }
 
 // ── tea.Cmd factories ─────────────────────────────────────────────────────
+
+// ── setup state restoration ───────────────────────────────────────────────
+
+// restoreState reads any saved setup state from disk and fast-forwards the
+// wizard to the appropriate step. Called from NewSetupModel so the user
+// resumes where they left off after a restart or crash.
+//
+// Steps that require async work (GPU detection, config form focus) dispatch
+// their cmds from Init() once the bubbletea runtime is active.
+func (m SetupModel) restoreState() SetupModel {
+	state, ok := runner.LoadSetupState()
+	if !ok {
+		return m
+	}
+
+	// Apply detection results saved in a previous run.
+	applyDetect := func() {
+		m.llamaInstalled = state.LlamaInstalled
+		m.detectedBinPath = state.DetectedBinPath
+		if state.LlamaInstalled && state.DetectedBinPath != "" {
+			m.runner.SetBinaryPath(state.DetectedBinPath)
+		}
+	}
+
+	switch state.Step {
+	case "install_prompt":
+		applyDetect()
+		m.step = stepInstallPrompt
+		m.installChoice = 0
+
+	case "gpu_select":
+		applyDetect()
+		m.step = stepGPUSelect
+		m.gpuChoice = 0
+		// Matched against availableBackends once detectAvailableMsg arrives.
+		m.restoredGPUBackend = state.GPUBackend
+
+	case "downloading":
+		// Was mid-download; go back to GPU select so the user confirms.
+		// detectAvailableCmd is fired from Init(); the download goroutine
+		// will resume via the persistent part file when they press enter.
+		applyDetect()
+		m.step = stepGPUSelect
+		m.gpuChoice = 0
+		m.restoredGPUBackend = state.GPUBackend
+
+	case "mode_select":
+		applyDetect()
+		if state.Mode == "remote" {
+			m.modeChoice = 1
+		} else {
+			m.modeChoice = 0
+		}
+		m.step = stepModeSelect
+
+	case "config_local":
+		applyDetect()
+		// Restore form values into cfg so initLocalInputs pre-fills correctly.
+		if state.ModelPath != "" {
+			m.cfg.Runner.ModelPath = state.ModelPath
+		}
+		if state.GPULayers != 0 {
+			m.cfg.Runner.GPULayers = state.GPULayers
+		}
+		if state.ContextSize != 0 {
+			m.cfg.Runner.ContextSize = state.ContextSize
+		}
+		if state.Port != 0 {
+			m.cfg.Runner.Port = state.Port
+		}
+		m.step = stepConfigLocal
+		m = m.initLocalInputs()
+		m, _ = m.refocusLocal() // state mutation only; cmd fired from Init()
+
+	case "config_remote":
+		applyDetect()
+		// Restore remote endpoint values into cfg so initRemoteInputs pre-fills.
+		if state.BaseURL != "" || state.APIKey != "" || state.Model != "" {
+			found := false
+			for i, ep := range m.cfg.Endpoints {
+				if ep.Name == "remote" {
+					m.cfg.Endpoints[i].BaseURL = state.BaseURL
+					m.cfg.Endpoints[i].APIKey = state.APIKey
+					m.cfg.Endpoints[i].Model = state.Model
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.cfg.Endpoints = append(m.cfg.Endpoints, config.EndpointConfig{
+					Name: "remote", BaseURL: state.BaseURL,
+					APIKey: state.APIKey, Model: state.Model,
+				})
+			}
+			m.cfg.Endpoint.Active = "remote"
+		}
+		m.step = stepConfigRemote
+		m = m.initRemoteInputs()
+		m, _ = m.refocusRemote() // state mutation only; cmd fired from Init()
+	}
+
+	return m
+}
 
 func spinnerTickCmd() tea.Cmd {
 	return tea.Tick(80*time.Millisecond, func(time.Time) tea.Msg { return setupSpinnerTickMsg{} })

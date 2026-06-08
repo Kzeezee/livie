@@ -103,6 +103,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── Chat → Setup transition (from /setup command) ───────────────────────
 	if action, ok := msg.(tui.CommandActionMsg); ok && action.Action == tui.ActionOpenSetup {
+		// Discard any saved wizard state — /setup is an explicit fresh start.
+		runner.DeleteSetupState()
 		m.setup = screens.NewSetupModel(m.cfg, m.runner, m.width, m.height)
 		m.current = screenSetup
 		return m, m.setup.Init()

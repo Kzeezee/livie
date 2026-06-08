@@ -19,6 +19,68 @@ import (
 
 const githubLatestRelease = "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest"
 
+// ── persistent part-file helpers ─────────────────────────────────────────
+
+// PartFilePath returns the path where an in-progress archive download is kept
+// across restarts. The same path is used regardless of archive format; the
+// original download URL stored in the sidecar meta is used to detect the
+// format at extraction time.
+func PartFilePath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "livie", "bin", "llama-server.archive.part")
+}
+
+// partMetaPath returns the sidecar JSON file that accompanies the part file.
+func partMetaPath() string { return PartFilePath() + ".meta" }
+
+// partMeta is persisted alongside the part file so we can validate whether a
+// cached partial download belongs to the same release URL on next launch.
+type partMeta struct {
+	URL   string `json:"url"`
+	Total int64  `json:"total"`
+}
+
+func loadPartMeta() (*partMeta, bool) {
+	data, err := os.ReadFile(partMetaPath())
+	if err != nil {
+		return nil, false
+	}
+	var m partMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, false
+	}
+	return &m, m.URL != ""
+}
+
+func savePartMeta(m *partMeta) {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(partMetaPath(), data, 0o644)
+}
+
+func deletePartFiles() {
+	_ = os.Remove(PartFilePath())
+	_ = os.Remove(partMetaPath())
+}
+
+// ResumeBytes returns the already-downloaded byte count and total file size
+// for any partial download cached on disk. Returns (0, 0) when none exists.
+// The setup screen calls this to pre-populate the progress bar before the
+// first ProgressUpdate arrives from the download goroutine.
+func ResumeBytes() (downloaded, total int64) {
+	meta, ok := loadPartMeta()
+	if !ok {
+		return 0, 0
+	}
+	info, err := os.Stat(PartFilePath())
+	if err != nil {
+		return 0, 0
+	}
+	return info.Size(), meta.Total
+}
+
 // ProgressUpdate is emitted by the download goroutine on each chunk received,
 // and once more as the final message when extraction completes (Done=true).
 type ProgressUpdate struct {
@@ -60,7 +122,8 @@ func DownloadProgressCmd(ch <-chan ProgressUpdate) tea.Cmd {
 }
 
 // downloadAndExtract performs the full pipeline: GitHub API lookup → streaming
-// download to temp file → ZIP extraction. Progress updates are written to ch.
+// download to a persistent part file (with HTTP Range resume on restart) →
+// archive extraction. Progress updates are written to ch.
 //
 // Returns the path to the extracted binary on success.
 // The final Done=true ProgressUpdate is NOT sent here — the caller (StartDownload)
@@ -72,33 +135,51 @@ func downloadAndExtract(ctx context.Context, platform Platform, destDir string, 
 		return "", fmt.Errorf("resolve release asset: %w", err)
 	}
 
-	// 2. Stream the archive to a temp file, emitting progress updates.
-	tmpExt := ".zip"
-	if strings.HasSuffix(url, ".tar.gz") {
-		tmpExt = ".tar.gz"
+	// 2. Open a persistent part file, resuming if we have a matching cached
+	//    partial download from a previous attempt.
+	partPath := PartFilePath()
+	if err := os.MkdirAll(filepath.Dir(partPath), 0o755); err != nil {
+		return "", fmt.Errorf("mkdir part dir: %w", err)
 	}
-	tmpFile, err := os.CreateTemp("", "livie-llama-*"+tmpExt)
-	if err != nil {
-		return "", fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
 
-	if err := downloadToFile(ctx, url, totalSize, tmpFile, ch); err != nil {
-		tmpFile.Close()
+	resumeOffset := int64(0)
+	if meta, ok := loadPartMeta(); ok && meta.URL == url {
+		if info, statErr := os.Stat(partPath); statErr == nil && info.Size() > 0 {
+			resumeOffset = info.Size()
+		}
+	}
+	// Always write/overwrite the meta so Total is up to date.
+	savePartMeta(&partMeta{URL: url, Total: totalSize})
+
+	var f *os.File
+	if resumeOffset > 0 {
+		f, err = os.OpenFile(partPath, os.O_WRONLY|os.O_APPEND, 0o644)
+	} else {
+		f, err = os.Create(partPath)
+	}
+	if err != nil {
+		return "", fmt.Errorf("open part file: %w", err)
+	}
+
+	// 3. Stream the remaining bytes, emitting progress updates.
+	if err := downloadToFile(ctx, url, totalSize, resumeOffset, f, ch); err != nil {
+		f.Close()
 		return "", err
 	}
-	tmpFile.Close()
+	f.Close()
 
-	// 3. Extract the binary from the ZIP.
+	// 4. Extract the binary from the archive.
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", destDir, err)
 	}
 
-	binaryPath, err := extractBinary(tmpPath, url, platform, destDir)
+	binaryPath, err := extractBinary(partPath, url, platform, destDir)
 	if err != nil {
 		return "", fmt.Errorf("extract binary: %w", err)
 	}
+
+	// 5. Clean up the part file now that extraction succeeded.
+	deletePartFiles()
 
 	return binaryPath, nil
 }
@@ -142,17 +223,25 @@ func resolveAssetURL(ctx context.Context, platform Platform) (url string, size i
 	return "", 0, fmt.Errorf("no release asset with suffix %q", suffix)
 }
 
-// downloadToFile streams url into f, writing non-blocking ProgressUpdates to ch.
+// downloadToFile streams url into f starting from resumeOffset, writing
+// non-blocking ProgressUpdates to ch. When resumeOffset > 0 a
+// "Range: bytes=N-" header is sent so the server skips bytes we already have.
+//
+// If the server responds 200 instead of 206 (no range support), the part file
+// is truncated and the download restarts from the beginning.
 //
 // Progress updates are sent with a non-blocking select: if the channel's 4-slot
 // buffer is full (consumer is behind), the update is dropped. The consumer
 // (DownloadProgressCmd) processes one update per tea.Cmd cycle, so at most a
 // few updates per second may be skipped under heavy traffic. This does not
 // affect correctness — the final Done message is sent unconditionally.
-func downloadToFile(ctx context.Context, url string, totalSize int64, f *os.File, ch chan<- ProgressUpdate) error {
+func downloadToFile(ctx context.Context, url string, totalSize int64, resumeOffset int64, f *os.File, ch chan<- ProgressUpdate) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
+	}
+	if resumeOffset > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeOffset))
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -161,16 +250,32 @@ func downloadToFile(ctx context.Context, url string, totalSize int64, f *os.File
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// Server ignored the Range header — truncate and restart from byte 0.
+		if resumeOffset > 0 {
+			if err := f.Truncate(0); err != nil {
+				return fmt.Errorf("truncate part file: %w", err)
+			}
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("seek part file: %w", err)
+			}
+			resumeOffset = 0
+		}
+	case http.StatusPartialContent:
+		// Resuming — keep resumeOffset as the baseline for progress.
+	default:
 		return fmt.Errorf("download returned %s", resp.Status)
 	}
 
-	if resp.ContentLength > 0 && totalSize == 0 {
-		totalSize = resp.ContentLength
+	// For a 206 response, Content-Length is the *remaining* bytes, so we
+	// derive the full size from resumeOffset + Content-Length when unknown.
+	if totalSize == 0 && resp.ContentLength > 0 {
+		totalSize = resumeOffset + resp.ContentLength
 	}
 
 	buf := make([]byte, 32*1024)
-	var downloaded int64
+	downloaded := resumeOffset // start progress at already-fetched offset
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -178,7 +283,7 @@ func downloadToFile(ctx context.Context, url string, totalSize int64, f *os.File
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
 			if _, err := f.Write(buf[:n]); err != nil {
-				return fmt.Errorf("write temp file: %w", err)
+				return fmt.Errorf("write part file: %w", err)
 			}
 			downloaded += int64(n)
 			select {
