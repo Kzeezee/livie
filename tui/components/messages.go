@@ -17,25 +17,41 @@ import (
 type MsgType int
 
 const (
-	MsgUser MsgType = iota
+	MsgUser      MsgType = iota
 	MsgAssistant
 	MsgSystem
 	MsgError
 	MsgCommand
-	msgRaw      // pre-rendered block (e.g. welcome screen)
-	MsgStreaming // reserved; streaming is handled by the separate streaming fields
+	MsgTool      // dim tool-activity line rendered after each tool executes
+	msgRaw       // pre-rendered block (e.g. welcome screen)
+	MsgStreaming  // reserved; streaming is handled by the separate streaming fields
 )
+
+// ToolActivity holds the display metadata for a MsgTool line.
+type ToolActivity struct {
+	Name    string
+	Args    string        // raw JSON args string
+	Elapsed time.Duration
+	OK      bool          // false = error or rejected
+	Status  string        // e.g. "✓", "✗ exit 1", "✗ rejected"
+}
 
 // Message is a single entry in the conversation history.
 type Message struct {
 	Type      MsgType
 	Content   string
 	Timestamp time.Time
+	Tool      ToolActivity  // populated only when Type == MsgTool
 }
 
 // NewMessage creates a message with the current timestamp.
 func NewMessage(t MsgType, content string) Message {
 	return Message{Type: t, Content: content, Timestamp: time.Now()}
+}
+
+// NewToolMessage creates a MsgTool activity line.
+func NewToolMessage(a ToolActivity) Message {
+	return Message{Type: MsgTool, Tool: a, Timestamp: time.Now()}
 }
 
 // nudgeStyle is created once and reused for the "↓ new messages" overlay.
@@ -338,6 +354,20 @@ func (m *MessagesModel) renderMessage(msg Message) string {
 		prefix := tui.StyleCommand.Render("⌘")
 		return prefix + " " + tui.StyleAccentPurple.Render(msg.Content) + "\n"
 
+	case MsgTool:
+		icon := tui.StyleDim.Render("  ⚙")
+		name := tui.StyleMuted.Render(" " + msg.Tool.Name)
+		argStr := truncateArgs(msg.Tool.Args, 40)
+		args := tui.StyleDim.Render("(" + argStr + ")")
+		elapsed := tui.StyleDim.Render(fmt.Sprintf("  %.1fs", msg.Tool.Elapsed.Seconds()))
+		var status string
+		if msg.Tool.OK {
+			status = tui.StyleAccentGreen.Render("  ✓")
+		} else {
+			status = tui.StyleAccentRose.Render("  " + msg.Tool.Status)
+		}
+		return icon + name + args + elapsed + status + "\n"
+
 	case msgRaw:
 		return msg.Content
 
@@ -401,6 +431,25 @@ func wrapText(s string, width int) string {
 }
 
 
+
+// truncateArgs strips the outer braces from a JSON args object and truncates
+// to max runes, appending "…" if needed. Returns the bare key:value content
+// for compact display in the tool activity line.
+//
+// Example: {"cmd":"echo hello","timeout":30} → `"cmd":"echo hello"…`
+func truncateArgs(s string, max int) string {
+	s = strings.TrimSpace(s)
+	// Strip surrounding {} for compactness.
+	if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
+		s = s[1 : len(s)-1]
+	}
+	s = strings.TrimSpace(s)
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
+}
 
 // Ensure fmt is used
 var _ = fmt.Sprintf

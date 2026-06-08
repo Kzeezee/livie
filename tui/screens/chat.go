@@ -54,6 +54,8 @@ type ChatModel struct {
 	input        components.InputModel
 	autocomplete components.AutocompleteModel
 	resumePicker components.SessionPickerModel
+	toolConfirm  components.ToolConfirmModel
+	pendingToolID string // ID of the in-flight tool call, "" when none
 
 	width  int
 	height int
@@ -86,6 +88,7 @@ func NewChatModel(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent, wid
 		input:        inputModel,
 		autocomplete: components.NewAutocompleteModel(width),
 		resumePicker: components.NewSessionPickerModel(width),
+		toolConfirm:  components.NewToolConfirmModel(width),
 		width:        width,
 		height:       height,
 		mode:         components.ModeChat,
@@ -208,12 +211,33 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 
 	case agent.StreamToolCallMsg:
 		m.messages.FinalizeStream()
-		m.messages.AddMessage(components.NewMessage(
-			components.MsgSystem,
-			fmt.Sprintf("[tool call: %s(%s)] — tool execution coming in a future update",
-				msg.Name, msg.Args),
-		))
+		if m.cfg.Behaviour.ConfirmToolCalls {
+			m.toolConfirm.Show(msg.ID, msg.Name, msg.Args)
+			m.pendingToolID = msg.ID
+			m.syncInputHeight()
+			return m, nil // wait for y/n keypress
+		}
+		// Auto-execute — no confirmation required.
+		return m, m.agent.DispatchToolCmd(msg.ID, msg.Name, msg.Args)
+
+	case agent.ToolResultMsg:
+		m.toolConfirm.Dismiss()
+		m.pendingToolID = ""
+		ok := msg.Err == nil
+		status := "✓"
+		if !ok {
+			status = "✗ " + trimError(msg.Err)
+		}
+		m.messages.AddMessage(components.NewToolMessage(components.ToolActivity{
+			Name:    msg.Name,
+			Args:    msg.Args,
+			Elapsed: msg.Elapsed,
+			OK:      ok,
+			Status:  status,
+		}))
 		m.messages.GotoBottom()
+		m.syncInputHeight()
+		return m, m.agent.ContinueAfterToolCmd(msg.ID, msg.Result)
 
 	case session.SummariesLoadedMsg:
 		if msg.Err != nil {
@@ -284,6 +308,32 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 }
 
 func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
+	// ── Tool confirm — highest priority ──────────────────────────────────────
+	if m.toolConfirm.IsVisible() {
+		switch {
+		case msg.String() == "y" || key.Matches(msg, m.keys.Submit):
+			id := m.toolConfirm.ID()
+			name := m.toolConfirm.Name()
+			args := m.toolConfirm.Args()
+			m.toolConfirm.Dismiss()
+			m.syncInputHeight()
+			return true, m.agent.DispatchToolCmd(id, name, args)
+		case msg.String() == "n" || key.Matches(msg, m.keys.Escape):
+			id := m.toolConfirm.ID()
+			m.messages.AddMessage(components.NewToolMessage(components.ToolActivity{
+				Name:   m.toolConfirm.Name(),
+				Args:   m.toolConfirm.Args(),
+				OK:     false,
+				Status: "✗ rejected",
+			}))
+			m.messages.GotoBottom()
+			m.toolConfirm.Dismiss()
+			m.pendingToolID = ""
+			m.syncInputHeight()
+			return true, m.agent.RejectToolCmd(id)
+		}
+	}
+
 	// ── Resume picker navigation — takes priority over autocomplete ──────────
 	if m.resumePicker.IsVisible() {
 		switch {
@@ -647,6 +697,8 @@ func (m *ChatModel) syncInputHeight() {
 	overlayH := m.autocomplete.Height()
 	if m.resumePicker.IsVisible() {
 		overlayH = m.resumePicker.Height()
+	} else if m.toolConfirm.IsVisible() {
+		overlayH = m.toolConfirm.Height()
 	}
 	newH := viewportH(m.height, m.input.Height(), overlayH)
 	if m.width != m.messages.Width() || newH != m.messages.Height() {
@@ -675,6 +727,8 @@ func (m ChatModel) View() tea.View {
 	}
 	if m.resumePicker.IsVisible() {
 		parts = append(parts, m.resumePicker.View())
+	} else if m.toolConfirm.IsVisible() {
+		parts = append(parts, m.toolConfirm.View())
 	} else if m.autocomplete.IsVisible() {
 		parts = append(parts, m.autocomplete.View())
 	}
@@ -734,6 +788,24 @@ func (m ChatModel) InputHeight() int { return m.input.Height() }
 
 // Input returns a read-only view of the input model for inspection in tests.
 func (m ChatModel) Input() components.InputModel { return m.input }
+
+// trimError returns a short single-line string from an error for the tool
+// activity status field.
+func trimError(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		s = s[:idx]
+	}
+	const maxErrLen = 40
+	runes := []rune(s)
+	if len(runes) > maxErrLen {
+		s = string(runes[:maxErrLen]) + "…"
+	}
+	return s
+}
 
 // TransitionToWelcome is no longer used — welcome is part of the chat screen.
 // Kept as a type so existing references compile cleanly.
