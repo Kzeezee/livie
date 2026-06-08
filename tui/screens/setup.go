@@ -3,8 +3,8 @@ package screens
 // setup.go — multi-step first-run wizard.
 //
 // State machine:
-//   stepBoot → stepDetecting → stepInstallPrompt | stepModeSelect
-//   stepInstallPrompt → stepGPUSelect | stepModeSelect
+//   stepBoot → stepDetecting → stepInstallPrompt (always)
+//   stepInstallPrompt → stepGPUSelect | stepModeSelect  (branches on llamaInstalled)
 //   stepGPUSelect → stepInstalling
 //   stepInstalling → stepModeSelect | stepInstallError
 //   stepInstallError → stepGPUSelect | stepModeSelect
@@ -73,6 +73,7 @@ type SetupModel struct {
 
 	// Detection result.
 	detectedBinPath string
+	llamaInstalled  bool // true when llama-server was found during detection
 
 	// GPU selection (stepGPUSelect).
 	availableBackends []runner.GPUBackend
@@ -157,11 +158,12 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 		if msg.Found {
 			m.detectedBinPath = msg.Path
 			m.runner.SetBinaryPath(msg.Path)
-			m = m.enterModeSelect(0)
+			m.llamaInstalled = true
 		} else {
-			m.step = stepInstallPrompt
-			m.installChoice = 0
+			m.llamaInstalled = false
 		}
+		m.step = stepInstallPrompt
+		m.installChoice = 0
 
 	case detectAvailableMsg:
 		m.availableBackends = msg.backends
@@ -225,11 +227,20 @@ func (m SetupModel) handleKey(msg tea.KeyPressMsg) (SetupModel, tea.Cmd) {
 				m.installChoice++
 			}
 		case "enter":
-			if m.installChoice == 0 {
-				return m.enterGPUSelect()
+			if m.llamaInstalled {
+				if m.installChoice == 0 {
+					return m.enterModeSelect(0), nil // Continue
+				}
+				return m.enterGPUSelect() // Wipe & reinstall
 			}
-			return m.enterModeSelect(1), nil
+			if m.installChoice == 0 {
+				return m.enterGPUSelect() // Install
+			}
+			return m.enterModeSelect(1), nil // Skip
 		case "esc":
+			if m.llamaInstalled {
+				return m.enterModeSelect(0), nil
+			}
 			return m.enterModeSelect(1), nil
 		}
 
@@ -651,6 +662,19 @@ func (m SetupModel) renderDetecting() string {
 }
 
 func (m SetupModel) renderInstallPrompt() string {
+	if m.llamaInstalled {
+		check := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentGreen)).Render("✓")
+		heading := check + lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextPrimary)).Bold(true).
+			Render("  llama-server installed")
+		pathLine := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextSecondary)).
+			Render("\n" + m.detectedBinPath + "\n")
+		choices := []string{"Continue", "Wipe and reinstall"}
+		hint := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextMuted)).
+			Render("enter to confirm · esc to continue")
+		return lipgloss.JoinVertical(lipgloss.Left,
+			heading, pathLine, renderMenu(choices, m.installChoice), "", hint)
+	}
+
 	cross := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentRose)).Render("✗")
 	heading := cross + lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextPrimary)).Bold(true).
 		Render("  llama-server not found")
