@@ -421,38 +421,18 @@ r.Register(&Command{
 
 ## SKILL.md for `core-tools`
 
+The model already receives full tool schemas via the API `tools` field — the
+SKILL.md body only needs to note non-obvious behaviours.
+
 ```markdown
-# Core Tools
+---
+name: core-tools
+description: Built-in file, shell, and search tools (bash, read_file, write_file, edit_file, find_files).
+---
 
-Livie has 5 built-in tools always available. Use them freely — they are fast,
-local, and require no network access.
-
-## Tools
-
-### `bash`
-Run any shell command. Captures combined stdout and stderr. Use for building,
-testing, grepping, file operations, or anything not covered by the other tools.
-Hard timeout of 30s (override with `timeout` parameter). Non-zero exit codes
-are not errors — the output and exit code are returned as the result.
-
-### `read_file`
-Read a file's contents. Use `offset` and `limit` (both line-based, 1-indexed)
-for large files. Always prefer this over `bash cat` for reading files.
-
-### `write_file`
-Write content to a file. Creates missing parent directories. Overwrites without
-warning. Prefer `edit_file` for targeted changes to existing files.
-
-### `edit_file`
-Apply precise old→new text substitutions to an existing file. Each `old_text`
-must appear exactly once — use a unique enough surrounding context if the target
-string is repeated. All edits are validated before any write; failure is
-atomic. Prefer this over `write_file` for modifying existing files.
-
-### `find_files`
-Walk a directory and return paths matching a filename glob (e.g. `*.go`, `*.md`).
-Pattern matches the filename only, not the full path. Use `bash` with `find`
-for recursive `**` patterns or path-based matching.
+- `edit_file` validates all edits before writing — failure is atomic
+- `bash` non-zero exit returns output + `[exit N]`, not an error
+- `find_files` matches filename only; use `bash` + `find` for path patterns
 ```
 
 ---
@@ -460,70 +440,53 @@ for recursive `**` patterns or path-based matching.
 ## SKILL.md for `livie-self`
 
 ```markdown
+---
+name: livie-self
+description: Livie application reference — modes, keys, commands, config, vault, self-modification.
+---
+
 # Livie
 
-You are running inside Livie — a terminal-native AI assistant written in Go
-using the Bubbletea TUI framework. This document describes the application
-so you can help users effectively and make informed self-modification decisions.
+Terminal-native AI assistant (Go + Bubbletea). Two modes: **chat** (default) and **bash**.
 
-## Modes
-
-Livie has two input modes:
-- **Chat mode** (default) — conversational; your responses stream into the viewport
-- **Bash mode** — you generate shell commands; the user confirms before execution
-
-Toggle with `ctrl+b`. Return to chat with `esc`.
-
-## Key Bindings
+## Keys
 
 | Key | Action |
 |---|---|
-| `enter` | Submit message |
-| `shift+enter` / `ctrl+j` | Insert newline |
-| `ctrl+c` twice | Quit |
-| `ctrl+q` | Quit immediately |
-| `page up/down` | Scroll viewport |
-| `ctrl+u` / `ctrl+d` | Scroll up/down half page |
-| `ctrl+g` / `ctrl+e` | Scroll to top/bottom |
-| `ctrl+y` | Copy last response to clipboard (OSC 52) |
+| `enter` | Submit |
+| `shift+enter` / `ctrl+j` | Newline |
+| `ctrl+c` ×2 / `ctrl+q` | Quit |
+| `pgup/pgdn` | Scroll |
+| `ctrl+u/d` | Half-page scroll |
+| `ctrl+g/e` | Top / bottom |
+| `ctrl+y` | Copy last response (OSC 52) |
 | `ctrl+b` | Toggle bash mode |
 
-## Slash Commands
+## Commands
 
-| Command | What it does |
+| Command | Action |
 |---|---|
-| `/new` | Start a fresh conversation |
-| `/resume` | Resume a previous session from a picker |
-| `/skills list` | List loaded skills |
-| `/skills install <path>` | Install a skill from a local directory |
-| `/run start\|stop\|restart` | Control the local llama-server runner |
+| `/new` | Fresh conversation |
+| `/resume` | Resume session |
+| `/skills list` | List skills |
+| `/skills install <path>` | Install skill |
+| `/run start\|stop\|restart` | Runner control |
 
-## Configuration
+## Config `~/.config/livie/config.toml`
 
-Config file: `~/.config/livie/config.toml`
+- `[endpoint] active` — active endpoint name
+- `[[endpoints]]` — name, base_url, api_key, model
+- `[runner]` — binary_path, model_path, gpu_backend, port
+- `[behaviour] confirm_tool_calls` — y/n before each tool
+- `[paths]` vault, skills, index
 
-Key fields:
-- `[endpoint]` `active` — which endpoint to use (`"local"` or a named remote)
-- `[[endpoints]]` — list of API endpoints (name, base_url, api_key, model)
-- `[runner]` — llama-server settings (binary_path, model_path, gpu_backend, port)
-- `[behaviour]` `confirm_tool_calls` — require y/n before each tool runs
-- `[paths]` `vault`, `skills`, `index` — data directories
+## Vault `~/.local/share/livie/vault/`
 
-## Vault
+`personality.md`, `memory.md`, `user-profile.md` — read/edit with file tools.
 
-Livie's memory lives in a Markdown vault at `~/.local/share/livie/vault/`:
-- `personality.md` — tone and behaviour traits
-- `memory.md` — rolling summary of past interactions
-- `user-profile.md` — user name, projects, habits
+## Self-modification
 
-Use `read_file` and `edit_file` to inspect and update these.
-
-## Self-Modification
-
-Livie's source is in the working directory at launch time. You can read and
-edit `.go` files directly using the file tools. Changes take effect after the
-user rebuilds (`go build .` or `go install .`). Always tell the user to rebuild
-after making source changes.
+Source is in cwd at launch. Edit `.go` files with file tools; tell the user to rebuild (`go build .`).
 ```
 
 ---

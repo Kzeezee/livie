@@ -28,12 +28,12 @@ func RegisterBuiltins(d *ToolDispatcher, cwd string) {
 func bashTool(cwd string) *Tool {
 	return &Tool{
 		Name:        "bash",
-		Description: "Run a shell command. Returns combined stdout and stderr. Use for file operations, running tests, building, searching, etc.",
+		Description: "Run a shell command. Non-zero exit returns output+[exit N], not an error.",
 		Parameters: []byte(`{
 			"type": "object",
 			"properties": {
-				"cmd":     {"type": "string",  "description": "Shell command to execute"},
-				"timeout": {"type": "number",  "description": "Timeout in seconds (default: 30)"}
+				"cmd":     {"type": "string"},
+				"timeout": {"type": "number", "description": "Seconds (default 30)"}
 			},
 			"required": ["cmd"]
 		}`),
@@ -93,13 +93,13 @@ func bashTool(cwd string) *Tool {
 func readFileTool(cwd string) *Tool {
 	return &Tool{
 		Name:        "read_file",
-		Description: "Read a file's contents, with optional line-range windowing.",
+		Description: "Read a file. Use offset/limit to window large files.",
 		Parameters: []byte(`{
 			"type": "object",
 			"properties": {
-				"path":   {"type": "string", "description": "File path to read"},
-				"offset": {"type": "number", "description": "Line to start reading from, 1-indexed (default: 1)"},
-				"limit":  {"type": "number", "description": "Maximum number of lines to return (default: 2000)"}
+				"path":   {"type": "string"},
+				"offset": {"type": "number", "description": "Start line, 1-indexed (default 1)"},
+				"limit":  {"type": "number", "description": "Max lines (default 2000)"}
 			},
 			"required": ["path"]
 		}`),
@@ -162,12 +162,12 @@ func readFileTool(cwd string) *Tool {
 func writeFileTool(cwd string) *Tool {
 	return &Tool{
 		Name:        "write_file",
-		Description: "Write content to a file. Creates the file and any missing parent directories. Overwrites if already exists.",
+		Description: "Write a file. Creates parent dirs. Overwrites existing.",
 		Parameters: []byte(`{
 			"type": "object",
 			"properties": {
-				"path":    {"type": "string", "description": "File path to write"},
-				"content": {"type": "string", "description": "Content to write"}
+				"path":    {"type": "string"},
+				"content": {"type": "string"}
 			},
 			"required": ["path", "content"]
 		}`),
@@ -200,12 +200,12 @@ func writeFileTool(cwd string) *Tool {
 func findFilesTool(cwd string) *Tool {
 	return &Tool{
 		Name:        "find_files",
-		Description: "Walk a directory tree and return paths matching a glob pattern. Pattern is matched against filenames only (e.g. '*.go', '*.md'). Use the bash tool with `find` for recursive ** patterns.",
+		Description: "Find files by filename glob. Use bash+find for recursive patterns.",
 		Parameters: []byte(`{
 			"type": "object",
 			"properties": {
-				"pattern": {"type": "string", "description": "Glob pattern to match against filename (e.g. '*.go', '*.md')"},
-				"dir":     {"type": "string", "description": "Directory to search (default: working directory)"}
+				"pattern": {"type": "string", "description": "Filename glob, e.g. *.go"},
+				"dir":     {"type": "string", "description": "Search root (default: cwd)"}
 			},
 			"required": ["pattern"]
 		}`),
@@ -277,19 +277,18 @@ func findFilesTool(cwd string) *Tool {
 func editFileTool(cwd string) *Tool {
 	return &Tool{
 		Name:        "edit_file",
-		Description: "Apply one or more precise old→new text substitutions to an existing file. Each old_text must appear exactly once.",
+		Description: "Apply exact text substitutions to a file. Each old_text must appear exactly once (atomic — all edits validated before any write).",
 		Parameters: []byte(`{
 			"type": "object",
 			"properties": {
-				"path": {"type": "string", "description": "File path to edit"},
+				"path": {"type": "string"},
 				"edits": {
 					"type": "array",
-					"description": "List of replacements to apply",
 					"items": {
 						"type": "object",
 						"properties": {
-							"old_text": {"type": "string", "description": "Exact text to replace (must appear exactly once)"},
-							"new_text": {"type": "string", "description": "Replacement text"}
+							"old_text": {"type": "string", "description": "Must be unique in file"},
+							"new_text": {"type": "string"}
 						},
 						"required": ["old_text", "new_text"]
 					}
