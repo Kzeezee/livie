@@ -19,6 +19,7 @@ type StreamChunkMsg struct {
 // StreamDoneMsg fires when the stream closes cleanly (finish_reason = stop).
 type StreamDoneMsg struct {
 	FullContent string
+	FinalDelta  string // any content accumulated in the last batch before EOF
 	Usage       UsageSnapshot
 }
 
@@ -31,9 +32,10 @@ type StreamErrMsg struct {
 // (finish_reason = tool_calls). The TUI either auto-dispatches or prompts
 // the user for confirmation depending on cfg.ConfirmToolCalls.
 type StreamToolCallMsg struct {
-	ID   string // tool_call_id from the API
-	Name string
-	Args string // raw JSON arguments string
+	ID         string // tool_call_id from the API
+	Name       string
+	Args       string // raw JSON arguments string
+	FinalDelta string // any content accumulated in the last batch before the tool call
 }
 
 // ToolResultMsg is returned by agent.DispatchToolCmd after a tool executes.

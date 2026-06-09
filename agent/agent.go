@@ -139,63 +139,91 @@ func (a *Agent) streamStartCmd(msgs []openai.ChatCompletionMessage, ep config.En
 	}
 }
 
-// PollCmd reads the next chunk from the active stream.
-// Must only be called when activeStream != nil (i.e. after StreamStartMsg).
-// ChatModel re-issues PollCmd on every StreamChunkMsg, creating a perpetual
-// polling loop that terminates on StreamDoneMsg, StreamToolCallMsg, or
-// StreamErrMsg.
+// PollCmd drains the active stream for up to 16 ms before returning to the
+// event loop, batching multiple chunks into a single StreamChunkMsg. This
+// keeps renders near 60 fps regardless of how fast the model streams tokens,
+// instead of paying a full glamour re-render cost on every individual chunk.
+//
+// Terminal states (EOF, tool_calls, error) are returned immediately.
+// FinalDelta carries any content accumulated in the same batch window as a
+// terminal state so the TUI can flush it before finalising the stream.
 func (a *Agent) PollCmd() tea.Cmd {
 	return func() tea.Msg {
-		resp, err := a.activeStream.Recv()
+		const batchWindow = 16 * time.Millisecond
+		deadline := time.Now().Add(batchWindow)
+		var delta strings.Builder
 
-		// Usage arrives in the last chunk before EOF when IncludeUsage is set.
-		if resp.Usage != nil {
-			a.lastUsage = resp.Usage
-		}
+		for {
+			resp, err := a.activeStream.Recv()
 
-		if errors.Is(err, io.EOF) {
-			content := a.streamBuf.String()
-			usage := a.snapshotUsage()
-			a.closeStream()
-			a.conv.AddAssistant(content)
-			return StreamDoneMsg{FullContent: content, Usage: usage}
-		}
-		if err != nil {
-			a.closeStream()
-			return StreamErrMsg{Err: fmt.Errorf("read stream: %w", err)}
-		}
-
-		if len(resp.Choices) == 0 {
-			// Empty chunk (e.g. keep-alive) — poll again.
-			return a.PollCmd()()
-		}
-
-		choice := resp.Choices[0]
-
-		// Accumulate tool call fields streamed across multiple chunks.
-		for _, tc := range choice.Delta.ToolCalls {
-			if tc.ID != "" {
-				a.pendingTool.id = tc.ID
+			// Usage arrives in the last chunk before EOF when IncludeUsage is set.
+			if resp.Usage != nil {
+				a.lastUsage = resp.Usage
 			}
-			if tc.Function.Name != "" {
-				a.pendingTool.name = tc.Function.Name
+
+			if errors.Is(err, io.EOF) {
+				content := a.streamBuf.String()
+				usage := a.snapshotUsage()
+				a.closeStream()
+				a.conv.AddAssistant(content)
+				return StreamDoneMsg{
+					FullContent: content,
+					FinalDelta:  delta.String(),
+					Usage:       usage,
+				}
 			}
-			a.pendingTool.args.WriteString(tc.Function.Arguments)
+			if err != nil {
+				a.closeStream()
+				return StreamErrMsg{Err: fmt.Errorf("read stream: %w", err)}
+			}
+
+			if len(resp.Choices) == 0 {
+				// Keep-alive chunk — count toward the deadline but don't break early.
+				if time.Now().After(deadline) {
+					break
+				}
+				continue
+			}
+
+			choice := resp.Choices[0]
+
+			// Accumulate tool call fields streamed across multiple chunks.
+			for _, tc := range choice.Delta.ToolCalls {
+				if tc.ID != "" {
+					a.pendingTool.id = tc.ID
+				}
+				if tc.Function.Name != "" {
+					a.pendingTool.name = tc.Function.Name
+				}
+				a.pendingTool.args.WriteString(tc.Function.Arguments)
+			}
+
+			if choice.FinishReason == openai.FinishReasonToolCalls {
+				id := a.pendingTool.id
+				name := a.pendingTool.name
+				args := a.pendingTool.args.String()
+				a.conv.AddToolCall(id, name, args)
+				a.closeStream()
+				a.resetPendingTool()
+				return StreamToolCallMsg{
+					ID:         id,
+					Name:       name,
+					Args:       args,
+					FinalDelta: delta.String(),
+				}
+			}
+
+			if d := choice.Delta.Content; d != "" {
+				delta.WriteString(d)
+				a.streamBuf.WriteString(d)
+			}
+
+			if time.Now().After(deadline) {
+				break
+			}
 		}
 
-		if choice.FinishReason == openai.FinishReasonToolCalls {
-			id := a.pendingTool.id
-			name := a.pendingTool.name
-			args := a.pendingTool.args.String()
-			a.conv.AddToolCall(id, name, args)
-			a.closeStream()
-			a.resetPendingTool()
-			return StreamToolCallMsg{ID: id, Name: name, Args: args}
-		}
-
-		delta := choice.Delta.Content
-		a.streamBuf.WriteString(delta)
-		return StreamChunkMsg{Delta: delta}
+		return StreamChunkMsg{Delta: delta.String()}
 	}
 }
 

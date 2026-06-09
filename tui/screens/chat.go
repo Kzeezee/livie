@@ -195,6 +195,9 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		return m, m.agent.PollCmd()
 
 	case agent.StreamDoneMsg:
+		if msg.FinalDelta != "" {
+			m.messages.AppendStream(msg.FinalDelta)
+		}
 		m.messages.FinalizeStream()
 		m.hud.TokensUsed = msg.Usage.TotalTokens
 		m.syncHUDState()
@@ -210,6 +213,9 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		m.messages.GotoBottom()
 
 	case agent.StreamToolCallMsg:
+		if msg.FinalDelta != "" {
+			m.messages.AppendStream(msg.FinalDelta)
+		}
 		m.messages.FinalizeStream()
 		if m.cfg.Behaviour.ConfirmToolCalls {
 			m.toolConfirm.Show(msg.ID, msg.Name, msg.Args)
