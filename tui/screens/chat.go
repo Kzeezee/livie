@@ -936,6 +936,7 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 	if mode != components.ModeBash {
 		m.bashAutocomplete.Dismiss()
 	}
+	m.messages.ClearSelection()
 	m.messages.GotoBottom()
 }
 
@@ -1031,15 +1032,11 @@ func (m ChatModel) View() tea.View {
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	v := tea.NewView(content)
 	v.AltScreen = true
-	// MouseMode is intentionally left as MouseModeNone (the zero value).
-	//
-	// Any mouse tracking mode (1000/1002/1003) puts the terminal into
-	// "grabbed" state, which routes button-press events to the app and
-	// prevents the terminal from performing native click-drag text
-	// selection. Kitty's mouse_map confirms this: plain left-press
-	// selection only fires in "ungrabbed" state.
-	//
-	// Scroll-wheel is handled via keyboard: PageUp / PageDown.
+	// MouseModeCellMotion (xterm mode 1002) delivers wheel events for scroll.
+	// Terminal-native drag selection is superseded by Livie's own drag-to-copy:
+	// click and drag inside the message history to select text; releasing
+	// automatically copies the selection to the clipboard.
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 

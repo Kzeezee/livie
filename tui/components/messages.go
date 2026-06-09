@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/x/ansi"
 	"charm.land/lipgloss/v2"
 	tui "github.com/kez/livie/tui"
 )
@@ -71,6 +72,9 @@ func NewBashOutputMessage(output string, exitCode int) Message {
 // nudgeStyle is created once and reused for the "↓ new messages" overlay.
 var nudgeStyle = lipgloss.NewStyle().Align(lipgloss.Right)
 
+// selectionStyle highlights lines during an active drag-to-copy gesture.
+var selectionStyle = lipgloss.NewStyle().Background(lipgloss.Color(tui.ColSurfaceHi))
+
 // MessagesModel manages the scrollable message history.
 type MessagesModel struct {
 	viewport     viewport.Model
@@ -85,6 +89,11 @@ type MessagesModel struct {
 	streaming       bool
 	streamContent   *strings.Builder // pointer avoids panic on value-copy
 	streamStartTime time.Time
+
+	// App-level text selection (drag to select, release copies to clipboard).
+	selectAnchor int  // absolute content-line index at mouse-down (-1 = inactive)
+	selectHead   int  // absolute content-line index at current drag position
+	selectActive bool // true once a drag gesture is in flight
 }
 
 // NewMessagesModel creates a new MessagesModel.
@@ -102,17 +111,23 @@ func NewMessagesModel(width, height int) MessagesModel {
 		Up:           key.NewBinding(key.WithKeys()),
 	}
 
+	// Enable mouse-wheel scroll; events arrive once MouseModeCellMotion is
+	// set on the tea.View in chat.go View().
+	vp.MouseWheelEnabled = true
+	vp.MouseWheelDelta = 3
+
 	r, _ := glamour.NewTermRenderer(
 		glamour.WithStandardStyle("dark"),
 		glamour.WithWordWrap(width-4),
 	)
 
 	return MessagesModel{
-		viewport: vp,
-		width:    width,
-		height:   height,
-		renderer: r,
-		atBottom: true,
+		viewport:     vp,
+		width:        width,
+		height:       height,
+		renderer:     r,
+		atBottom:     true,
+		selectAnchor: -1,
 	}
 }
 
@@ -209,16 +224,55 @@ func (m *MessagesModel) AddMessage(msg Message) {
 // Init implements tea.Model.
 func (m MessagesModel) Init() tea.Cmd { return nil }
 
-// Update handles scroll events.
+// Update handles scroll and text-selection mouse events.
 func (m MessagesModel) Update(msg tea.Msg) (MessagesModel, tea.Cmd) {
 	var cmd tea.Cmd
 
-	prevOffset := m.viewport.YOffset()
-	m.viewport, cmd = m.viewport.Update(msg)
+	// ── App-level text selection ─────────────────────────────────────────────
+	switch ev := msg.(type) {
+	case tea.MouseClickMsg:
+		// Left click within the viewport begins a new selection gesture.
+		if ev.Button == tea.MouseLeft && ev.Y >= 0 && ev.Y < m.height {
+			m.viewport.StyleLineFunc = nil // clear any prior highlight
+			m.selectAnchor = ev.Y + m.viewport.YOffset()
+			m.selectActive = false
+		}
 
-	// Track whether we're at the bottom
-	atBottom := m.viewport.AtBottom()
-	if atBottom {
+	case tea.MouseMotionMsg:
+		// Left-button drag extends the selection.
+		if ev.Button == tea.MouseLeft && m.selectAnchor >= 0 {
+			m.selectActive = true
+			head := ev.Y + m.viewport.YOffset()
+			if total := m.viewport.TotalLineCount(); total > 0 && head >= total {
+				head = total - 1
+			}
+			if head < 0 {
+				head = 0
+			}
+			m.selectHead = head
+			m.updateSelectionStyle()
+		}
+
+	case tea.MouseReleaseMsg:
+		// Left-button release finalises and copies selected text to clipboard.
+		if ev.Button == tea.MouseLeft {
+			if m.selectActive {
+				m.selectActive = false
+				if text := m.selectedText(); text != "" {
+					cmd = tea.SetClipboard(text)
+				}
+			}
+			m.selectAnchor = -1
+			m.viewport.StyleLineFunc = nil
+		}
+	}
+
+	// ── Forward to viewport (handles tea.MouseWheelMsg for scroll) ──────────
+	prevOffset := m.viewport.YOffset()
+	m.viewport, _ = m.viewport.Update(msg)
+
+	// Track whether we're at the bottom.
+	if m.viewport.AtBottom() {
 		m.atBottom = true
 		m.newWhileAway = false
 	} else if m.viewport.YOffset() != prevOffset {
@@ -278,6 +332,52 @@ func (m *MessagesModel) ScrollDown() {
 	if m.atBottom {
 		m.newWhileAway = false
 	}
+}
+
+// ClearSelection clears any active or completed text selection.
+// Call this on mode switches, /new, and other context resets.
+func (m *MessagesModel) ClearSelection() {
+	m.selectAnchor = -1
+	m.selectActive = false
+	m.viewport.StyleLineFunc = nil
+}
+
+// updateSelectionStyle sets viewport.StyleLineFunc to highlight the selected
+// line range while a drag gesture is in flight.
+func (m *MessagesModel) updateSelectionStyle() {
+	lo := min(m.selectAnchor, m.selectHead)
+	hi := max(m.selectAnchor, m.selectHead)
+	m.viewport.StyleLineFunc = func(lineIdx int) lipgloss.Style {
+		if lineIdx >= lo && lineIdx <= hi {
+			return selectionStyle
+		}
+		return lipgloss.NewStyle()
+	}
+}
+
+// selectedText extracts the currently selected viewport lines, strips all ANSI
+// escape codes, and returns plain text ready for the system clipboard.
+func (m *MessagesModel) selectedText() string {
+	lo := min(m.selectAnchor, m.selectHead)
+	hi := max(m.selectAnchor, m.selectHead)
+
+	lines := strings.Split(m.viewport.GetContent(), "\n")
+	if lo < 0 {
+		lo = 0
+	}
+	if hi >= len(lines) {
+		hi = len(lines) - 1
+	}
+	if lo > hi || lo >= len(lines) {
+		return ""
+	}
+
+	selected := lines[lo : hi+1]
+	stripped := make([]string, len(selected))
+	for i, l := range selected {
+		stripped[i] = strings.TrimRight(ansi.Strip(l), " ")
+	}
+	return strings.TrimSpace(strings.Join(stripped, "\n"))
 }
 
 // View renders the message viewport.
