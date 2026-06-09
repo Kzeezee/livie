@@ -12,6 +12,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/kez/livie/config"
+	"github.com/kez/livie/skills"
+	"github.com/kez/livie/skills/core"
+	"github.com/kez/livie/skills/livieself"
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -24,12 +27,19 @@ type pendingToolCall struct {
 	args strings.Builder
 }
 
+// SkillInfo is a name/description pair returned by SkillList.
+type SkillInfo struct {
+	Name        string
+	Description string
+}
+
 // Agent drives the LLM request–response cycle and owns conversation history.
 type Agent struct {
-	cfg   *config.Config
-	conv  *Conversation
-	tools *ToolDispatcher
-	cwd   string // working directory fixed at launch
+	cfg    *config.Config
+	conv   *Conversation
+	tools  *ToolDispatcher
+	loader *skills.SkillLoader
+	cwd    string // working directory fixed at launch
 
 	// Active stream state — non-nil only during a streaming response.
 	activeStream *openai.ChatCompletionStream
@@ -41,23 +51,123 @@ type Agent struct {
 }
 
 // New creates a new Agent from the given config.
+// It constructs the skill loader, registers built-in and external skills,
+// and builds the initial system prompt from the vault + skill descriptions.
 func New(cfg *config.Config) *Agent {
-	sysprompt := LoadSystemPrompt(
-		filepath.Join(cfg.Paths.Vault, "system_prompt.md"),
-	)
-	maxTok := contextLimit(cfg)
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "." // fallback — should never fail in practice
 	}
+
+	loader := skills.NewLoader(cfg.Paths.Skills, cwd)
+	loader.RegisterBuiltin(core.New(cwd))
+	loader.RegisterBuiltin(livieself.New())
+	_ = loader.DiscoverExternal() // non-fatal — missing dir is fine
+
 	d := NewToolDispatcher()
-	RegisterBuiltins(d, cwd)
+	loader.LoadAll(d)
+
+	sysprompt := buildSystemPrompt(cfg, loader)
+	maxTok := contextLimit(cfg)
+
 	return &Agent{
-		cfg:   cfg,
-		conv:  NewConversation(sysprompt, maxTok),
-		tools: d,
-		cwd:   cwd,
+		cfg:    cfg,
+		conv:   NewConversation(sysprompt, maxTok),
+		tools:  d,
+		loader: loader,
+		cwd:    cwd,
 	}
+}
+
+// ── Skill accessors ───────────────────────────────────────────────────────────
+
+// SkillCount returns the number of currently loaded skills.
+func (a *Agent) SkillCount() int { return a.loader.Count() }
+
+// SkillList returns a name/description pair for every loaded skill.
+func (a *Agent) SkillList() []SkillInfo {
+	loaded := a.loader.Skills()
+	out := make([]SkillInfo, len(loaded))
+	for i, s := range loaded {
+		out[i] = SkillInfo{Name: s.Name(), Description: s.Description()}
+	}
+	return out
+}
+
+// InstallSkill copies srcPath into cfg.Paths.Skills/<basename>, then
+// rediscovers external skills and reloads tools onto the dispatcher.
+// The system prompt is updated so subsequent conversations include the
+// new skill's SKILL.md body.
+func (a *Agent) InstallSkill(srcPath string) error {
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("source path not found: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("source must be a directory")
+	}
+
+	if err := os.MkdirAll(a.cfg.Paths.Skills, 0o755); err != nil {
+		return fmt.Errorf("create skills directory: %w", err)
+	}
+
+	destName := filepath.Base(srcPath)
+	destPath := filepath.Join(a.cfg.Paths.Skills, destName)
+	if err := copyDir(srcPath, destPath); err != nil {
+		return fmt.Errorf("copy skill: %w", err)
+	}
+
+	// Re-discover external skills (addSkill deduplicates by name).
+	_ = a.loader.DiscoverExternal()
+	// Register any newly discovered tools (idempotent via overwrite).
+	a.loader.LoadAll(a.tools)
+
+	// Rebuild the system prompt to include the new skill's SKILL.md.
+	a.conv.UpdateSystemPrompt(buildSystemPrompt(a.cfg, a.loader))
+
+	return nil
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+// copyDir recursively copies src into dst, creating directories as needed.
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, info.Mode())
+		}
+		return copyFile(path, dstPath)
+	})
+}
+
+// copyFile copies a single file from src to dst.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // resetPendingTool clears the tool call accumulator after each dispatch.

@@ -150,6 +150,15 @@ func (c *Conversation) BuildMessages() ([]openai.ChatCompletionMessage, *truncat
 	}
 }
 
+// UpdateSystemPrompt replaces the current system prompt in-place.
+// Called after installing a new skill so subsequent API requests include
+// the new skill's SKILL.md content. Does not affect existing history.
+func (c *Conversation) UpdateSystemPrompt(p string) {
+	if p != "" {
+		c.systemPrompt = p
+	}
+}
+
 // Reset clears history (retains system prompt). Called by /new.
 func (c *Conversation) Reset() {
 	c.history = nil

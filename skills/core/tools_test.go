@@ -1,22 +1,26 @@
-package agent
+package core_test
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kez/livie/agent"
+	"github.com/kez/livie/skills/core"
 )
 
-// helper: fresh dispatcher with builtins registered against a temp dir
-func newTestDispatcher(t *testing.T) (*ToolDispatcher, string) {
+// newTestDispatcher creates a fresh ToolDispatcher with core tools registered
+// against a temporary directory, returning the dispatcher and the temp dir.
+func newTestDispatcher(t *testing.T) (*agent.ToolDispatcher, string) {
 	t.Helper()
 	dir := t.TempDir()
-	d := NewToolDispatcher()
-	RegisterBuiltins(d, dir)
+	d := agent.NewToolDispatcher()
+	core.RegisterTools(d, dir)
 	return d, dir
 }
 
-// ── 4: bash tool ─────────────────────────────────────────────────────────────
+// ── bash tool ─────────────────────────────────────────────────────────────────
 
 func TestBash_SimpleEcho(t *testing.T) {
 	d, _ := newTestDispatcher(t)
@@ -31,7 +35,6 @@ func TestBash_SimpleEcho(t *testing.T) {
 
 func TestBash_NonZeroExitIsNotAnError(t *testing.T) {
 	d, _ := newTestDispatcher(t)
-	// 'false' exits with code 1 — the tool should return output+[exit 1], not an error
 	out, err := d.Dispatch("bash", `{"cmd":"echo oops && exit 1"}`)
 	if err != nil {
 		t.Fatalf("non-zero exit should not return an error, got: %v", err)
@@ -43,7 +46,6 @@ func TestBash_NonZeroExitIsNotAnError(t *testing.T) {
 
 func TestBash_Timeout(t *testing.T) {
 	d, _ := newTestDispatcher(t)
-	// 0.1 s timeout against a 10 s sleep
 	out, err := d.Dispatch("bash", `{"cmd":"sleep 10","timeout":0.1}`)
 	if err != nil {
 		t.Fatalf("timeout should not return an error, got: %v", err)
@@ -55,7 +57,6 @@ func TestBash_Timeout(t *testing.T) {
 
 func TestBash_CWDIsRespected(t *testing.T) {
 	d, dir := newTestDispatcher(t)
-	// pwd should print the temp dir, not wherever the test binary runs
 	out, err := d.Dispatch("bash", `{"cmd":"pwd"}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -65,12 +66,11 @@ func TestBash_CWDIsRespected(t *testing.T) {
 	}
 }
 
-// ── 5: edit_file uniqueness guard ────────────────────────────────────────────
+// ── edit_file ─────────────────────────────────────────────────────────────────
 
 func TestEditFile_Success(t *testing.T) {
 	d, dir := newTestDispatcher(t)
 
-	// Write a test file
 	path := filepath.Join(dir, "hello.txt")
 	_ = os.WriteFile(path, []byte("hello world\n"), 0o644)
 
@@ -101,7 +101,6 @@ func TestEditFile_NotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should report old_text not found, not crash
 	if !strings.Contains(out, "not found") && !strings.Contains(out, "error") {
 		t.Fatalf("expected not-found message, got %q", out)
 	}
@@ -110,7 +109,6 @@ func TestEditFile_NotFound(t *testing.T) {
 func TestEditFile_NotUnique(t *testing.T) {
 	d, dir := newTestDispatcher(t)
 
-	// "foo" appears twice — edit should be rejected
 	path := filepath.Join(dir, "dupe.txt")
 	_ = os.WriteFile(path, []byte("foo bar foo\n"), 0o644)
 
@@ -125,7 +123,6 @@ func TestEditFile_NotUnique(t *testing.T) {
 		t.Fatalf("expected 'not unique' error, got %q", out)
 	}
 
-	// File must be unchanged
 	data, _ := os.ReadFile(path)
 	if string(data) != "foo bar foo\n" {
 		t.Fatalf("file was modified despite uniqueness error: %q", string(data))
@@ -138,7 +135,6 @@ func TestEditFile_MultipleEditsAtomic(t *testing.T) {
 	path := filepath.Join(dir, "atomic.txt")
 	_ = os.WriteFile(path, []byte("alpha beta gamma\n"), 0o644)
 
-	// Second edit references a string that doesn't exist — whole operation fails
 	out, err := d.Dispatch("edit_file", `{
 		"path": "atomic.txt",
 		"edits": [
@@ -153,7 +149,6 @@ func TestEditFile_MultipleEditsAtomic(t *testing.T) {
 		t.Fatalf("expected 'not found' for edit 2, got %q", out)
 	}
 
-	// File must be unchanged — first edit should NOT have been applied
 	data, _ := os.ReadFile(path)
 	if string(data) != "alpha beta gamma\n" {
 		t.Fatalf("file was partially modified: %q", string(data))

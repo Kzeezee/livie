@@ -35,6 +35,9 @@ const (
 	// Phase 6–8 additions:
 	ActionOpenResume    // handled by ChatModel — fires session.ListSummariesCmd
 	ActionResumeSession // handled by ChatModel — loads the selected session
+
+	// Phase 10 additions:
+	ActionSkillsUpdated // handled by ChatModel — refreshes HUD skill count after install
 )
 
 // SubArg describes a named sub-argument for a /command (e.g. "start" for /run).
@@ -280,7 +283,6 @@ func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manag
 		}
 	}
 
-	r.Register(stub("skills", "List, install, enable or disable skills"))
 	r.Register(stub("usage", "Show token usage and cost estimate for this session"))
 	r.Register(&Command{
 		Name:        "resume",

@@ -266,7 +266,9 @@ func NewChatModel(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent, wid
 	}
 
 	m.registry.Register(newCmd(m))
+	m.registry.Register(skillsCmd(agt))
 	m.hud.CWD = shortenHomePath(initCwd)
+	m.hud.SkillCount = agt.SkillCount()
 	m.syncHUDState()
 	m.showWelcome()
 	return m
@@ -289,7 +291,11 @@ func healthTickCmd() tea.Cmd {
 
 // showWelcome renders the welcome block into the top of the viewport.
 func (m *ChatModel) showWelcome() {
-	block := RenderWelcomeBlock(m.cfg, m.width)
+	skillCount := 0
+	if m.agent != nil {
+		skillCount = m.agent.SkillCount()
+	}
+	block := RenderWelcomeBlock(m.cfg, m.width, skillCount)
 	// Insert as a raw block message so it sits above any conversation
 	m.messages.AddRaw(block)
 	m.messages.GotoBottom()
@@ -786,6 +792,11 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 		m.messages.AddMessage(components.NewMessage(components.MsgSystem, "restarting runner…"))
 		m.messages.GotoBottom()
 		return m.runner.RestartCmd(30 * time.Second)
+
+	case tui.ActionSkillsUpdated:
+		// HUD skill count is refreshed via syncHUDState which is called
+		// every second by hudTickMsg. Trigger it immediately here too.
+		m.syncHUDState()
 	}
 
 	return nil
@@ -845,6 +856,11 @@ func (m *ChatModel) syncHUDState() {
 		m.hud.TokensMax = m.cfg.Runner.ContextSize
 	} else {
 		m.hud.TokensMax = 0
+	}
+
+	// ── Skill count ───────────────────────────────────────────────────────────
+	if m.agent != nil {
+		m.hud.SkillCount = m.agent.SkillCount()
 	}
 
 	// ── Working directory ─────────────────────────────────────────────────────
@@ -1125,6 +1141,50 @@ func newCmd(_ ChatModel) *tui.Command {
 		Description: "Start a new conversation and return to the welcome screen",
 		Handler: func(args []string) (string, tui.AppAction) {
 			return "", tui.ActionNew
+		},
+	}
+}
+
+// skillsCmd returns the /skills command, capturing the agent pointer directly
+// so it can call SkillList and InstallSkill without going through the action
+// system for values that require data from the loader.
+func skillsCmd(agt *agent.Agent) *tui.Command {
+	return &tui.Command{
+		Name:        "skills",
+		Description: "List or install skills",
+		Subcommands: []tui.SubArg{
+			{Name: "list", Description: "List all loaded skills"},
+			{Name: "install", Description: "Install a skill from a local path"},
+		},
+		Handler: func(args []string) (string, tui.AppAction) {
+			sub := ""
+			if len(args) > 0 {
+				sub = args[0]
+			}
+			switch sub {
+			case "", "list":
+				list := agt.SkillList()
+				if len(list) == 0 {
+					return "_No skills loaded._", tui.ActionNone
+				}
+				var sb strings.Builder
+				sb.WriteString(fmt.Sprintf("**%d skill(s) loaded**\n\n", len(list)))
+				for _, s := range list {
+					sb.WriteString(fmt.Sprintf("  `%-20s` %s\n", s.Name, s.Description))
+				}
+				return strings.TrimRight(sb.String(), "\n"), tui.ActionNone
+			case "install":
+				if len(args) < 2 {
+					return "usage: `/skills install <path>`", tui.ActionNone
+				}
+				path := args[1]
+				if err := agt.InstallSkill(path); err != nil {
+					return fmt.Sprintf("✗ install failed: %s", err), tui.ActionNone
+				}
+				return fmt.Sprintf("✓ skill installed from `%s` · %d skill(s) now loaded", path, agt.SkillCount()), tui.ActionSkillsUpdated
+			default:
+				return fmt.Sprintf("unknown sub-command %q — try: `list`, `install`", sub), tui.ActionNone
+			}
 		},
 	}
 }

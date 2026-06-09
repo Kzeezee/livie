@@ -42,11 +42,11 @@ const portrait = `⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀�
 
 // RenderWelcomeBlock renders the neofetch-style welcome block as a plain string.
 // This is embedded into the chat viewport on startup and on /new.
-func RenderWelcomeBlock(cfg *config.Config, width int) string {
+func RenderWelcomeBlock(cfg *config.Config, width int, skillCount int) string {
 	si := tui.GatherSysInfo()
 
 	left := renderPortraitBlock()
-	right := renderInfoBlock(cfg, si)
+	right := renderInfoBlock(cfg, si, skillCount)
 
 	cols := lipgloss.JoinHorizontal(lipgloss.Top, left, "    ", right)
 
@@ -66,7 +66,7 @@ func renderPortraitBlock() string {
 	return strings.Join(styled, "\n")
 }
 
-func renderInfoBlock(cfg *config.Config, si tui.SysInfo) string {
+func renderInfoBlock(cfg *config.Config, si tui.SysInfo, skillCount int) string {
 	header := tui.StyleAccentCyan.Bold(true).Render(si.Username) +
 		tui.StyleLabel.Render("@") +
 		tui.StyleAccentCyan.Bold(true).Render(si.Hostname)
@@ -81,7 +81,7 @@ func renderInfoBlock(cfg *config.Config, si tui.SysInfo) string {
 		{"Config", shortenPath(cfg.ConfigPath)},
 		{"Vault", shortenPath(cfg.Paths.Vault)},
 		{"Model", cfg.ModelName()},
-		{"Skills", fmt.Sprintf("%d loaded", 0)},
+		{"Skills", fmt.Sprintf("%d loaded", skillCount)},
 	}
 
 	var infoLines []string

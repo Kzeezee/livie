@@ -1,4 +1,4 @@
-package agent
+package core
 
 import (
 	"bytes"
@@ -10,23 +10,25 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/kez/livie/skills"
 )
 
-// RegisterBuiltins registers the 5 built-in tools on the dispatcher.
+// RegisterTools registers the 5 built-in tools on r.
 // cwd is the working directory fixed at agent launch time; all relative paths
 // are resolved against it.
-func RegisterBuiltins(d *ToolDispatcher, cwd string) {
-	d.Register(bashTool(cwd))
-	d.Register(readFileTool(cwd))
-	d.Register(writeFileTool(cwd))
-	d.Register(findFilesTool(cwd))
-	d.Register(editFileTool(cwd))
+func RegisterTools(r skills.Registrar, cwd string) {
+	r.Register(bashTool(cwd))
+	r.Register(readFileTool(cwd))
+	r.Register(writeFileTool(cwd))
+	r.Register(findFilesTool(cwd))
+	r.Register(editFileTool(cwd))
 }
 
 // ── bash ─────────────────────────────────────────────────────────────────────
 
-func bashTool(cwd string) *Tool {
-	return &Tool{
+func bashTool(cwd string) *skills.Tool {
+	return &skills.Tool{
 		Name:        "bash",
 		Description: "Run a shell command. Non-zero exit returns output+[exit N], not an error.",
 		Parameters: []byte(`{
@@ -90,8 +92,8 @@ func bashTool(cwd string) *Tool {
 
 // ── read_file ─────────────────────────────────────────────────────────────────
 
-func readFileTool(cwd string) *Tool {
-	return &Tool{
+func readFileTool(cwd string) *skills.Tool {
+	return &skills.Tool{
 		Name:        "read_file",
 		Description: "Read a file. Use offset/limit to window large files.",
 		Parameters: []byte(`{
@@ -159,8 +161,8 @@ func readFileTool(cwd string) *Tool {
 
 // ── write_file ────────────────────────────────────────────────────────────────
 
-func writeFileTool(cwd string) *Tool {
-	return &Tool{
+func writeFileTool(cwd string) *skills.Tool {
+	return &skills.Tool{
 		Name:        "write_file",
 		Description: "Write a file. Creates parent dirs. Overwrites existing.",
 		Parameters: []byte(`{
@@ -197,8 +199,8 @@ func writeFileTool(cwd string) *Tool {
 
 // ── find_files ────────────────────────────────────────────────────────────────
 
-func findFilesTool(cwd string) *Tool {
-	return &Tool{
+func findFilesTool(cwd string) *skills.Tool {
+	return &skills.Tool{
 		Name:        "find_files",
 		Description: "Find files by filename glob. Use bash+find for recursive patterns.",
 		Parameters: []byte(`{
@@ -260,9 +262,6 @@ func findFilesTool(cwd string) *Tool {
 			}
 
 			output := strings.Join(results, "\n")
-			// Note: we walked up to maxResults+1 entries but capped at maxResults,
-			// so we don't know the exact total of remaining entries. A second walk
-			// would be expensive; just note the cap was hit.
 			if len(results) == maxResults {
 				output += fmt.Sprintf("\n[results capped at %d — use a narrower pattern or dir]", maxResults)
 			}
@@ -274,8 +273,8 @@ func findFilesTool(cwd string) *Tool {
 
 // ── edit_file ─────────────────────────────────────────────────────────────────
 
-func editFileTool(cwd string) *Tool {
-	return &Tool{
+func editFileTool(cwd string) *skills.Tool {
+	return &skills.Tool{
 		Name:        "edit_file",
 		Description: "Apply exact text substitutions to a file. Each old_text must appear exactly once (atomic — all edits validated before any write).",
 		Parameters: []byte(`{

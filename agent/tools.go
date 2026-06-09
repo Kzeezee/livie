@@ -4,33 +4,27 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/kez/livie/skills"
 	openai "github.com/sashabaranov/go-openai"
 )
 
-// Tool describes a single callable tool exposed to the model.
-type Tool struct {
-	Name        string
-	Description string
-	// Parameters is a JSON Schema object.
-	// Example: {"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}
-	Parameters json.RawMessage
-	Handler    func(args string) (string, error)
-}
-
 // ToolDispatcher holds registered tools and dispatches calls by name.
+// It implements skills.Registrar, allowing skill packages to register
+// tools without importing the agent package (avoiding import cycles).
 type ToolDispatcher struct {
-	tools map[string]*Tool
+	tools map[string]*skills.Tool
 }
 
 // NewToolDispatcher creates an empty ToolDispatcher.
 func NewToolDispatcher() *ToolDispatcher {
 	return &ToolDispatcher{
-		tools: make(map[string]*Tool),
+		tools: make(map[string]*skills.Tool),
 	}
 }
 
-// Register adds a tool. A duplicate name silently overwrites the prior entry.
-func (d *ToolDispatcher) Register(t *Tool) {
+// Register adds a tool. Implements skills.Registrar.
+// A duplicate name silently overwrites the prior entry.
+func (d *ToolDispatcher) Register(t *skills.Tool) {
 	d.tools[t.Name] = t
 }
 
@@ -65,7 +59,6 @@ func (d *ToolDispatcher) Definitions() []openai.Tool {
 
 // Dispatch invokes the named tool with the raw JSON args string.
 // Returns ErrToolNotFound when the name is not registered.
-// Phase 6: always returns ErrToolNotFound — no tools are registered.
 func (d *ToolDispatcher) Dispatch(name, args string) (string, error) {
 	t, ok := d.tools[name]
 	if !ok {
