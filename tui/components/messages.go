@@ -17,14 +17,16 @@ import (
 type MsgType int
 
 const (
-	MsgUser      MsgType = iota
+	MsgUser       MsgType = iota
 	MsgAssistant
 	MsgSystem
 	MsgError
 	MsgCommand
-	MsgTool      // dim tool-activity line rendered after each tool executes
-	msgRaw       // pre-rendered block (e.g. welcome screen)
-	MsgStreaming  // reserved; streaming is handled by the separate streaming fields
+	MsgTool       // dim tool-activity line rendered after each tool executes
+	MsgBashCmd    // the command line submitted in bash mode
+	MsgBashOutput // pre-formatted output from a bash command
+	msgRaw        // pre-rendered block (e.g. welcome screen)
+	MsgStreaming   // reserved; streaming is handled by the separate streaming fields
 )
 
 // ToolActivity holds the display metadata for a MsgTool line.
@@ -41,7 +43,8 @@ type Message struct {
 	Type      MsgType
 	Content   string
 	Timestamp time.Time
-	Tool      ToolActivity  // populated only when Type == MsgTool
+	Tool      ToolActivity // populated only when Type == MsgTool
+	ExitCode  int         // populated only when Type == MsgBashOutput; non-zero = error
 }
 
 // NewMessage creates a message with the current timestamp.
@@ -52,6 +55,16 @@ func NewMessage(t MsgType, content string) Message {
 // NewToolMessage creates a MsgTool activity line.
 func NewToolMessage(a ToolActivity) Message {
 	return Message{Type: MsgTool, Tool: a, Timestamp: time.Now()}
+}
+
+// NewBashCmdMessage creates a MsgBashCmd entry (the submitted command line).
+func NewBashCmdMessage(cmd string) Message {
+	return Message{Type: MsgBashCmd, Content: cmd, Timestamp: time.Now()}
+}
+
+// NewBashOutputMessage creates a MsgBashOutput entry for shell command results.
+func NewBashOutputMessage(output string, exitCode int) Message {
+	return Message{Type: MsgBashOutput, Content: output, ExitCode: exitCode, Timestamp: time.Now()}
 }
 
 // nudgeStyle is created once and reused for the "↓ new messages" overlay.
@@ -353,6 +366,31 @@ func (m *MessagesModel) renderMessage(msg Message) string {
 	case MsgCommand:
 		prefix := tui.StyleCommand.Render("⌘")
 		return prefix + " " + tui.StyleAccentPurple.Render(msg.Content) + "\n"
+
+	case MsgBashCmd:
+		prompt := tui.StyleAccentRose.Render("▶ $")
+		cmd := tui.StyleLabel.Render(" " + msg.Content)
+		ts := tui.StyleDim.Render("  " + msg.Timestamp.Format("15:04"))
+		return prompt + cmd + ts + "\n"
+
+	case MsgBashOutput:
+		output := strings.TrimRight(msg.Content, "\n")
+		if output == "" {
+			line := tui.StyleDim.Render("  (no output)")
+			if msg.ExitCode != 0 {
+				line += " " + tui.StyleAccentRose.Render(fmt.Sprintf("[exit %d]", msg.ExitCode))
+			}
+			return line + "\n"
+		}
+		lines := strings.Split(output, "\n")
+		var outSB strings.Builder
+		for _, l := range lines {
+			outSB.WriteString(tui.StyleMuted.Render("  "+l) + "\n")
+		}
+		if msg.ExitCode != 0 {
+			outSB.WriteString(tui.StyleAccentRose.Render(fmt.Sprintf("  [exit %d]", msg.ExitCode)) + "\n")
+		}
+		return outSB.String()
 
 	case MsgTool:
 		icon := tui.StyleDim.Render("  ⚙")

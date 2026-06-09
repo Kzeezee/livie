@@ -84,9 +84,14 @@ func (m *InputModel) SetValue(s string) {
 	m.autoGrow()
 }
 
-// SetMode updates the current mode.
+// SetMode updates the current mode and adjusts the placeholder text.
 func (m *InputModel) SetMode(mode InputMode) {
 	m.mode = mode
+	if mode == ModeBash {
+		m.textarea.Placeholder = "$ bash command…"
+	} else {
+		m.textarea.Placeholder = "Type a message... (/help for commands)"
+	}
 }
 
 // SetDisabled enables or disables the input (during streaming).

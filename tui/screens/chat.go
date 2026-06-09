@@ -1,7 +1,10 @@
 package screens
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -19,6 +22,43 @@ import (
 
 // quitConfirmMsg fires when the second ctrl+c window expires.
 type quitConfirmMsg struct{}
+
+// bashResultMsg carries the output of a bash command back to the update loop.
+type bashResultMsg struct {
+	command  string
+	output   string
+	exitCode int
+}
+
+// bashExecCmd runs a shell command and returns bashResultMsg with combined
+// stdout+stderr. A 30 s timeout is applied. Non-zero exit codes are captured
+// as exitCode (not a Go error) so the output is always shown to the user.
+func bashExecCmd(command string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "bash", "-c", command)
+		out, err := cmd.CombinedOutput()
+		exitCode := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			} else {
+				// context deadline or other OS-level failure
+				exitCode = -1
+				if len(out) == 0 {
+					out = []byte(err.Error())
+				}
+			}
+		}
+		return bashResultMsg{
+			command:  command,
+			output:   string(out),
+			exitCode: exitCode,
+		}
+	}
+}
 
 // hudTickMsg fires every second to refresh runner state in the HUD.
 type hudTickMsg struct{}
@@ -297,6 +337,10 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		}
 		m.messages.GotoBottom()
 
+	case bashResultMsg:
+		m.messages.AddMessage(components.NewBashOutputMessage(msg.output, msg.exitCode))
+		m.messages.GotoBottom()
+
 	case quitConfirmMsg:
 		m.quitFirst = false
 	}
@@ -476,6 +520,7 @@ func (m *ChatModel) handleSubmit() tea.Cmd {
 	}
 	m.input.Reset()
 
+	// Slash commands work in any mode.
 	if strings.HasPrefix(text, "/") {
 		m.messages.AddMessage(components.NewMessage(components.MsgCommand, text))
 		response, action := m.registry.Dispatch(text)
@@ -484,6 +529,14 @@ func (m *ChatModel) handleSubmit() tea.Cmd {
 		}
 	}
 
+	// ── Bash mode: execute as a real shell command ───────────────────────────
+	if m.mode == components.ModeBash {
+		m.messages.AddMessage(components.NewBashCmdMessage(text))
+		m.messages.GotoBottom()
+		return bashExecCmd(text)
+	}
+
+	// ── Chat mode: send to the AI ────────────────────────────────────────────
 	// Set session identity on the first user message.
 	if m.sessionID == "" {
 		m.sessionID = time.Now().Format("2006-01-02T15-04-05")

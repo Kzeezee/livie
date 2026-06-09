@@ -460,7 +460,7 @@ Terminal-native AI assistant (Go + Bubbletea). Two modes: **chat** (default) and
 | `ctrl+u/d` | Half-page scroll |
 | `ctrl+g/e` | Top / bottom |
 | `ctrl+y` | Copy last response (OSC 52) |
-| `ctrl+b` | Toggle bash mode |
+| `shift+tab` | Toggle bash mode |
 
 ## Commands
 
