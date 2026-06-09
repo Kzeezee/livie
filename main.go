@@ -8,6 +8,7 @@ import (
 	"github.com/kez/livie/agent"
 	"github.com/kez/livie/app"
 	"github.com/kez/livie/config"
+	"github.com/kez/livie/memory"
 	"github.com/kez/livie/runner"
 )
 
@@ -17,6 +18,11 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "livie: config: %v\n", err)
 		os.Exit(1)
+	}
+
+	if err := memory.Init(cfg.Paths.Vault); err != nil {
+		// Non-fatal. Agent will fall back to defaultSystemPrompt.
+		fmt.Fprintf(os.Stderr, "livie: vault init warning: %v\n", err)
 	}
 
 	mgr := runner.NewManager(cfg.Runner)
