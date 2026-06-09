@@ -2,10 +2,8 @@ package components
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"charm.land/lipgloss/v2"
 	tui "github.com/kez/livie/tui"
@@ -46,6 +44,7 @@ func (m InputMode) String() string {
 // HUDState holds all data the HUD needs to render. Plain value type — no AI coupling.
 type HUDState struct {
 	Mode         InputMode
+	CWD          string // current working directory, home-shortened (e.g. ~/projects/livie)
 	ModelName    string
 	EndpointName string
 	TokensUsed   int
@@ -63,6 +62,7 @@ type HUDState struct {
 func DefaultHUDState() HUDState {
 	return HUDState{
 		Mode:         ModeChat,
+		CWD:          "~",
 		ModelName:    "(no model)",
 		EndpointName: "local",
 		TokensUsed:   0,
@@ -84,7 +84,10 @@ func RenderHUD(state HUDState, width int) string {
 	inner := width - 2 // lipgloss Padding(0,1) consumes 1 col each side
 
 	// ── Row 1: ~/dir  (MODE) ─────────────────────────────────────────────────
-	dir := currentDir()
+	dir := state.CWD
+	if dir == "" {
+		dir = "~"
+	}
 	dirStr := tui.StyleLabel.Render(truncateDir(dir, 36))
 	modeTag := renderModeBadge(state.Mode)
 	row1Content := dirStr + "  " + modeTag
@@ -169,31 +172,6 @@ func renderTokens(used, max int) string {
 	default:
 		return tui.StyleLabel.Render(str)
 	}
-}
-
-var (
-	cachedDir     string
-	cachedDirOnce sync.Once
-)
-
-func currentDir() string {
-	cachedDirOnce.Do(func() {
-		dir, err := os.Getwd()
-		if err != nil {
-			cachedDir = "~"
-			return
-		}
-		home, err := os.UserHomeDir()
-		if err != nil {
-			cachedDir = dir
-			return
-		}
-		if strings.HasPrefix(dir, home) {
-			dir = "~" + dir[len(home):]
-		}
-		cachedDir = dir
-	})
-	return cachedDir
 }
 
 // truncateDir shortens a path like ~/a/very/long/path to ~/a/v/l/path

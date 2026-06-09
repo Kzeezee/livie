@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -23,22 +24,106 @@ import (
 // quitConfirmMsg fires when the second ctrl+c window expires.
 type quitConfirmMsg struct{}
 
+// bashCompletionsMsg delivers shell completion results to the update loop.
+type bashCompletionsMsg struct {
+	completions []string
+	prefix      string
+	wordStart   int
+}
+
+// bashCompleteCmd runs bash's compgen to fetch completions for the current
+// input word, then checks whether each result is a directory (appending "/")
+// so the model can tell them apart at render time.
+//
+// Completion strategy:
+//   - First word with no path separator: command + file completion (-A command -A file)
+//   - All other cases: file completion only (-A file)
+//
+// Results are capped at 100 entries. The function runs asynchronously so the
+// TUI stays responsive while bash spawns.
+func bashCompleteCmd(input, cwd string) tea.Cmd {
+	return func() tea.Msg {
+		// Find the word being completed: everything after the last space.
+		wordStart := strings.LastIndex(input, " ") + 1
+		prefix := input[wordStart:]
+
+		// Choose compgen mode: command+file for the first token without a path
+		// separator, file-only for everything else.
+		compgenArgs := "-A file"
+		if wordStart == 0 && !strings.ContainsAny(prefix, "/") {
+			compgenArgs = "-A command -A file"
+		}
+
+		// The wrapper:
+		//  - cd to the current bash cwd so relative paths resolve correctly
+		//  - run compgen with the prefix from LIVIE_PREFIX (avoids quoting issues)
+		//  - append "/" to directory entries so callers can distinguish them
+		//  - cap at 100 entries
+		script := fmt.Sprintf(
+			`cd %s 2>/dev/null
+while IFS= read -r __c; do
+  if [ -d "$__c" ]; then printf '%%s/\n' "$__c"
+  else printf '%%s\n' "$__c"
+  fi
+done < <(compgen %s -- "$LIVIE_PREFIX" 2>/dev/null | head -100)`,
+			shellQuote(cwd), compgenArgs,
+		)
+		cmd := exec.Command("bash", "-c", script)
+		cmd.Env = append(os.Environ(), "LIVIE_PREFIX="+prefix)
+		out, _ := cmd.Output() // ignore error — empty output = no completions
+
+		var completions []string
+		if len(out) > 0 {
+			for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+				if line != "" {
+					completions = append(completions, line)
+				}
+			}
+		}
+
+		return bashCompletionsMsg{
+			completions: completions,
+			prefix:      prefix,
+			wordStart:   wordStart,
+		}
+	}
+}
+
+// bashPWDSentinel delimits the pwd capture appended to every bash command's
+// output. Null bytes are used because they cannot appear in a directory path
+// and are vanishingly unlikely in normal command output.
+const bashPWDSentinel = "\x00LIVIE_PWD\x00"
+
 // bashResultMsg carries the output of a bash command back to the update loop.
 type bashResultMsg struct {
 	command  string
 	output   string
 	exitCode int
+	newCwd   string // pwd captured after the command ran
 }
 
-// bashExecCmd runs a shell command and returns bashResultMsg with combined
-// stdout+stderr. A 30 s timeout is applied. Non-zero exit codes are captured
-// as exitCode (not a Go error) so the output is always shown to the user.
-func bashExecCmd(command string) tea.Cmd {
+// bashExecCmd runs a shell command inside a wrapper script that:
+//  1. cds to the current tracked cwd so state persists across commands
+//  2. runs the user command via eval of the LIVIE_CMD env var — avoids all
+//     quoting/escaping issues and lets cd / pushd / etc. take effect
+//  3. prints a null-byte-delimited sentinel with the final pwd
+//  4. exits with the user command's exit code
+//
+// The sentinel is stripped from the output before display and used to update
+// the model's bashCwd so the next command starts in the right directory.
+func bashExecCmd(command, cwd string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "bash", "-c", command)
+
+		script := fmt.Sprintf(
+			"cd %s 2>/dev/null\neval \"$LIVIE_CMD\"\n__livie_ec=$?\nprintf '\\x00LIVIE_PWD\\x00%%s\\x00' \"$(pwd)\"\nexit $__livie_ec",
+			shellQuote(cwd),
+		)
+		cmd := exec.CommandContext(ctx, "bash", "-c", script)
+		cmd.Env = append(os.Environ(), "LIVIE_CMD="+command)
 		out, err := cmd.CombinedOutput()
+
 		exitCode := 0
 		if err != nil {
 			var exitErr *exec.ExitError
@@ -52,12 +137,44 @@ func bashExecCmd(command string) tea.Cmd {
 				}
 			}
 		}
+
+		// Parse the sentinel to extract the new working directory.
+		output := string(out)
+		newCwd := cwd // fall back if the sentinel is absent (e.g. timeout)
+		if idx := strings.Index(output, bashPWDSentinel); idx >= 0 {
+			rest := output[idx+len(bashPWDSentinel):]
+			if end := strings.IndexByte(rest, '\x00'); end >= 0 {
+				if parsed := rest[:end]; parsed != "" {
+					newCwd = parsed
+				}
+			}
+			output = output[:idx] // strip sentinel from displayed output
+		}
+
 		return bashResultMsg{
 			command:  command,
-			output:   string(out),
+			output:   output,
 			exitCode: exitCode,
+			newCwd:   newCwd,
 		}
 	}
+}
+
+// shellQuote wraps s in single quotes, escaping any single quotes within.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''"  ) + "'"
+}
+
+// shortenHomePath replaces the user's home directory prefix with ~.
+func shortenHomePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if strings.HasPrefix(p, home) {
+		return "~" + p[len(home):]
+	}
+	return p
 }
 
 // hudTickMsg fires every second to refresh runner state in the HUD.
@@ -106,6 +223,13 @@ type ChatModel struct {
 
 	sessionID        string
 	sessionCreatedAt time.Time
+
+	// bashCwd is the working directory maintained across bash-mode commands.
+	// Initialised to the process cwd at startup; updated after every command.
+	bashCwd string
+
+	// bashAutocomplete holds shell completion suggestions shown over the input.
+	bashAutocomplete components.BashAutocompleteModel
 }
 
 const (
@@ -117,24 +241,32 @@ func NewChatModel(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent, wid
 	inputModel := components.NewInputModel(width)
 	vpH := viewportH(height, inputModel.Height(), 0)
 
+	initCwd, err := os.Getwd()
+	if err != nil {
+		initCwd = "."
+	}
+
 	m := ChatModel{
-		cfg:          cfg,
-		runner:       mgr,
-		agent:        agt,
-		keys:         tui.DefaultKeyMap(),
-		registry:     tui.NewCommandRegistry(cfg, mgr),
-		hud:          components.DefaultHUDState(),
-		messages:     components.NewMessagesModel(width, vpH),
-		input:        inputModel,
-		autocomplete: components.NewAutocompleteModel(width),
-		resumePicker: components.NewSessionPickerModel(width),
-		toolConfirm:  components.NewToolConfirmModel(width),
-		width:        width,
-		height:       height,
-		mode:         components.ModeChat,
+		cfg:              cfg,
+		runner:           mgr,
+		agent:            agt,
+		keys:             tui.DefaultKeyMap(),
+		registry:         tui.NewCommandRegistry(cfg, mgr),
+		hud:              components.DefaultHUDState(),
+		messages:         components.NewMessagesModel(width, vpH),
+		input:            inputModel,
+		autocomplete:     components.NewAutocompleteModel(width),
+		bashAutocomplete: components.NewBashAutocompleteModel(width),
+		resumePicker:     components.NewSessionPickerModel(width),
+		toolConfirm:      components.NewToolConfirmModel(width),
+		width:            width,
+		height:           height,
+		mode:             components.ModeChat,
+		bashCwd:          initCwd,
 	}
 
 	m.registry.Register(newCmd(m))
+	m.hud.CWD = shortenHomePath(initCwd)
 	m.syncHUDState()
 	m.showWelcome()
 	return m
@@ -337,7 +469,22 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		}
 		m.messages.GotoBottom()
 
+	case bashCompletionsMsg:
+		if len(msg.completions) == 1 {
+			// Single result: insert directly without showing the popup.
+			return m, m.insertBashCompletion(msg.completions[0], msg.wordStart)
+		}
+		m.bashAutocomplete.SetCompletions(msg.completions, msg.prefix, msg.wordStart)
+		m.syncInputHeight()
+
 	case bashResultMsg:
+		if msg.newCwd != "" && msg.newCwd != m.bashCwd {
+			m.bashCwd = msg.newCwd
+			// Keep the OS-level process cwd in sync so that agent tool calls
+			// and any other subprocess inherit the updated directory.
+			_ = os.Chdir(msg.newCwd)
+			m.hud.CWD = shortenHomePath(msg.newCwd)
+		}
 		m.messages.AddMessage(components.NewBashOutputMessage(msg.output, msg.exitCode))
 		m.messages.GotoBottom()
 
@@ -401,6 +548,44 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 			m.resumePicker.Dismiss()
 			m.syncInputHeight()
 			return true, nil
+		}
+	}
+
+	// ── Bash autocomplete — only active in bash mode ────────────────────────
+	if m.mode == components.ModeBash {
+		if m.bashAutocomplete.IsVisible() {
+			switch {
+			case key.Matches(msg, m.keys.AutocompleteDown):
+				m.bashAutocomplete.MoveDown()
+				m.syncInputHeight()
+				return true, nil
+
+			case key.Matches(msg, m.keys.AutocompleteUp):
+				m.bashAutocomplete.MoveUp()
+				m.syncInputHeight()
+				return true, nil
+
+			case key.Matches(msg, m.keys.AutocompleteAccept): // Tab: cycle forward
+				m.bashAutocomplete.MoveDown()
+				m.syncInputHeight()
+				return true, nil
+
+			case key.Matches(msg, m.keys.Submit): // Enter: accept into input
+				return true, m.acceptBashCompletion()
+
+			case key.Matches(msg, m.keys.Escape):
+				m.bashAutocomplete.Dismiss()
+				m.syncInputHeight()
+				return true, nil
+
+			default:
+				// Any other key (typing, backspace…) dismisses the popup and
+				// falls through to normal key handling.
+				m.bashAutocomplete.Dismiss()
+				m.syncInputHeight()
+			}
+		} else if key.Matches(msg, m.keys.AutocompleteAccept) { // Tab with no popup
+			return true, bashCompleteCmd(m.input.Value(), m.bashCwd)
 		}
 	}
 
@@ -531,9 +716,9 @@ func (m *ChatModel) handleSubmit() tea.Cmd {
 
 	// ── Bash mode: execute as a real shell command ───────────────────────────
 	if m.mode == components.ModeBash {
-		m.messages.AddMessage(components.NewBashCmdMessage(text))
+		m.messages.AddMessage(components.NewBashCmdMessage(shortenHomePath(m.bashCwd), text))
 		m.messages.GotoBottom()
-		return bashExecCmd(text)
+		return bashExecCmd(text, m.bashCwd)
 	}
 
 	// ── Chat mode: send to the AI ────────────────────────────────────────────
@@ -661,6 +846,9 @@ func (m *ChatModel) syncHUDState() {
 	} else {
 		m.hud.TokensMax = 0
 	}
+
+	// ── Working directory ─────────────────────────────────────────────────────
+	m.hud.CWD = shortenHomePath(m.bashCwd)
 }
 
 // saveSession persists the current conversation to disk.
@@ -745,7 +933,45 @@ func (m *ChatModel) setMode(mode components.InputMode) {
 	m.mode = mode
 	m.hud.Mode = mode
 	m.input.SetMode(mode)
+	if mode != components.ModeBash {
+		m.bashAutocomplete.Dismiss()
+	}
 	m.messages.GotoBottom()
+}
+
+// insertBashCompletion builds the new input value from a single completion
+// and an offset into the original string, then fires another completion fetch
+// if the result is a directory (so Tab-into-dir feels instant).
+func (m *ChatModel) insertBashCompletion(completion string, wordStart int) tea.Cmd {
+	current := m.input.Value()
+	base := ""
+	if wordStart <= len(current) {
+		base = current[:wordStart]
+	}
+	isDir := strings.HasSuffix(completion, "/")
+	newInput := base + completion
+	if !isDir {
+		newInput += " "
+	}
+	m.input.SetValue(newInput)
+	m.syncInputHeight()
+	if isDir {
+		return bashCompleteCmd(newInput, m.bashCwd)
+	}
+	return nil
+}
+
+// acceptBashCompletion accepts the currently highlighted completion from the
+// popup, inserts it into the input, and dismisses the popup.
+func (m *ChatModel) acceptBashCompletion() tea.Cmd {
+	sel := m.bashAutocomplete.Selected()
+	wordStart := m.bashAutocomplete.WordStart()
+	m.bashAutocomplete.Dismiss()
+	if sel == "" {
+		m.syncInputHeight()
+		return nil
+	}
+	return m.insertBashCompletion(sel, wordStart)
 }
 
 // syncInputHeight resizes the messages viewport to account for current input
@@ -758,6 +984,8 @@ func (m *ChatModel) syncInputHeight() {
 		overlayH = m.resumePicker.Height()
 	} else if m.toolConfirm.IsVisible() {
 		overlayH = m.toolConfirm.Height()
+	} else if m.mode == components.ModeBash && m.bashAutocomplete.IsVisible() {
+		overlayH = m.bashAutocomplete.Height()
 	}
 	newH := viewportH(m.height, m.input.Height(), overlayH)
 	if m.width != m.messages.Width() || newH != m.messages.Height() {
@@ -769,7 +997,12 @@ func (m *ChatModel) relayout() {
 	m.input.SetWidth(m.width)
 	m.autocomplete.SetWidth(m.width)
 	m.autocomplete.SetInput(m.input.Value(), m.registry)
-	vpH := viewportH(m.height, m.input.Height(), m.autocomplete.Height())
+	m.bashAutocomplete.SetWidth(m.width)
+	overlayH := m.autocomplete.Height()
+	if m.mode == components.ModeBash && m.bashAutocomplete.IsVisible() {
+		overlayH = m.bashAutocomplete.Height()
+	}
+	vpH := viewportH(m.height, m.input.Height(), overlayH)
 	m.messages.SetSize(m.width, vpH)
 }
 
@@ -788,6 +1021,8 @@ func (m ChatModel) View() tea.View {
 		parts = append(parts, m.resumePicker.View())
 	} else if m.toolConfirm.IsVisible() {
 		parts = append(parts, m.toolConfirm.View())
+	} else if m.mode == components.ModeBash && m.bashAutocomplete.IsVisible() {
+		parts = append(parts, m.bashAutocomplete.View())
 	} else if m.autocomplete.IsVisible() {
 		parts = append(parts, m.autocomplete.View())
 	}

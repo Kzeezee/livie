@@ -58,8 +58,9 @@ func NewToolMessage(a ToolActivity) Message {
 }
 
 // NewBashCmdMessage creates a MsgBashCmd entry (the submitted command line).
-func NewBashCmdMessage(cmd string) Message {
-	return Message{Type: MsgBashCmd, Content: cmd, Timestamp: time.Now()}
+// cwd should already be home-shortened (e.g. "~/projects/livie").
+func NewBashCmdMessage(cwd, cmd string) Message {
+	return Message{Type: MsgBashCmd, Content: cwd + " $ " + cmd, Timestamp: time.Now()}
 }
 
 // NewBashOutputMessage creates a MsgBashOutput entry for shell command results.
