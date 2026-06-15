@@ -24,9 +24,11 @@ From `About-Livie.md`:
 > an in-process, pure Go library with no external dependencies, no subprocess, and no
 > CGo. It persists its index to disk between sessions.
 
-> At query time, the user's message is embedded and nearest-neighbour chunks are
-> retrieved. Retrieved context is injected into the prompt before the model generates
-> a response. The AI can also directly invoke the vector search as a tool call.
+> The vector index is queried on-demand — either explicitly by the user (e.g. "find
+> photos of X", "search my notes for Y") or when the AI determines retrieval is
+> warranted via tool call. The index is **not** queried on every prompt. The AI
+> invokes `search_index` as a deliberate tool call when it judges context retrieval
+> is necessary.
 
 > Indexing runs as a background process and does not block the TUI.
 
@@ -35,14 +37,15 @@ From `About-Livie.md`:
 - Embedding client wrapping llama-server `/v1/embeddings`
 - Text chunking for Markdown, plain text, and code files
 - Background indexing goroutine with progress reporting to TUI
-- `search_index` AI tool (skills/rag package)
+- `search_index` AI tool (skills/rag package) — pull model only (explicit invocation)
 - `/index` slash commands: `add`, `status`, `clear`
+- **Image indexing** via vision-model captioning (Phase 9H) — caption stored as searchable text
+- **Lightweight video description** via keyframe sampling + vision captioning (Phase 9H)
 
 **Explicitly out of scope (future phases):**
 - PDF, EPUB ingestion (require external parsing libraries)
-- Image captioning via Gemma 4 vision
-- Audio/video transcript ingestion (Whisper)
-- Auto-inject nearest-neighbour chunks into every prompt (hybrid push/pull — Phase 10)
+- Full audio/video transcript ingestion via Whisper (heavy, slow)
+- Auto-inject nearest-neighbour chunks into every prompt — see Phase 10 note below
 - Wikilink cross-reference traversal in vault files
 - Web URL fetching and indexing
 
@@ -56,8 +59,9 @@ Decision already locked in `About-Livie.md`. In-process, pure Go, no CGo, persis
 disk at `~/.local/share/livie/index`. Zero external runtime dependencies.
 
 Single collection: `"documents"`. Metadata fields on each document carry `source`,
-`type` (`markdown`, `text`, `code`), `lang` (for code), and `chunk_index` so results
-can be re-ordered or deduplicated at retrieval time.
+`type` (`markdown`, `text`, `code`, `image`, `video`), `lang` (for code), `chunk_index`,
+and `media_desc` (for image/video entries) so results can be re-ordered or deduplicated
+at retrieval time.
 
 ### Embedding model: llama-server `/v1/embeddings`
 
@@ -79,6 +83,11 @@ splitting — those require NLP libraries or model calls. Simple, fast, determin
 |---|---|---|
 | Markdown / plain text | 1,000 chars | 150 chars |
 | Code | 800 chars | 100 chars |
+| Image caption | N/A (single doc) | — |
+| Video description | N/A (single doc) | — |
+
+Images and videos produce a single document per file (the generated caption/description),
+so they are never chunked — there is nothing to overlap.
 
 Chunk IDs: `sha256(filepath + chunk_index)[:16]` — stable across re-index of unchanged
 files, allows upsert semantics in chromem-go.
@@ -88,14 +97,78 @@ alongside the chromem-go index (`index/manifest.json`). Files whose mtime matche
 manifest entry are skipped. Deleted files are pruned from both the manifest and the
 collection on the next `add` of their parent directory.
 
-### `search_index` tool — pull model
+### `search_index` tool — pull model only
 
-The AI calls `search_index` explicitly when it wants to retrieve context. It is not
-auto-injected into every prompt. This keeps the architecture simple and avoids the cost
-of embedding every user message.
+The AI calls `search_index` explicitly when it determines retrieval is warranted. The
+vector DB is **never** queried automatically on every message. This is intentional:
 
-Auto-injection (every prompt embeds the user message and retrieves top-k chunks before
-calling the model) is Phase 10. Phase 9 ships the pull model only.
+- Embedding every user message adds latency even when no retrieval is needed
+- Most conversational turns have nothing to do with indexed files
+- Irrelevant chunks injected transparently degrade response quality and waste context
+- The AI (guided by `SKILL.md`) is better placed than the system to decide when to search
+
+**When `search_index` should be called:**
+- User explicitly asks to search/find something ("find my notes on X", "search for images of Y")
+- User asks about a document, file, or topic likely to be in indexed content
+- User queries about media files (images, videos) by description or subject
+- The AI needs to ground its response in local files rather than relying on training knowledge
+
+**When `search_index` should NOT be called:**
+- General conversation, questions, coding help — anything that doesn't require local file context
+- Follow-up turns in an existing conversation that already retrieved context
+- Queries the AI can answer confidently from its own knowledge
+
+Phase 9 ships the pull model only. See Phase 10 note at the bottom for why auto-injection
+is a deliberate non-goal.
+
+### Media indexing — images and video
+
+#### Images
+
+Accepted extensions: `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`.
+
+When a supported image is encountered during indexing:
+1. The raw image bytes are base64-encoded and sent to llama-server as a vision request
+   using the chat completions endpoint with the loaded multimodal model (Gemma 4 or LLaVA).
+2. The prompt is fixed: `"Describe this image concisely in 2-3 sentences. Include subjects,
+   setting, colours, and any visible text."`
+3. The returned caption is stored as a single chromem document with `type = "image"` and
+   the original file path in `source`.
+4. If the active model has no vision capability (non-multimodal GGUF), image indexing is
+   skipped with a warning in the progress output: `"skipped (no vision model)"`.
+
+Gating: image captioning uses the same llama-server endpoint and inherits the same
+"local runner required" constraint as text embedding. No second binary needed.
+
+#### Videos — lightweight keyframe description
+
+Full video transcription via Whisper is out of scope (slow, heavy, requires a second
+model). Instead, Phase 9H uses a lightweight keyframe-sampling strategy:
+
+1. **Probe duration** — call `ffprobe -v quiet -print_format json -show_format <file>`
+   to get total duration. If `ffprobe` is not on PATH, video indexing is skipped gracefully.
+2. **Extract N keyframes** — run `ffmpeg -ss <t> -i <file> -frames:v 1 -q:v 2 <tmpfile.jpg>`
+   for N evenly spaced timestamps. Default `N = 4` (start, 33%, 66%, end).
+   Frames are written to a temp directory and cleaned up after captioning.
+3. **Caption each frame** — same vision request as images above.
+4. **Stitch into a timeline description** — combine captions into a single text block:
+   ```
+   Video: <filename> (duration: 2m14s)
+   [0:00] A person sits at a desk typing on a laptop in a bright office.
+   [0:44] Close-up of a code editor showing a Go file.
+   [1:29] The person points at a whiteboard with a diagram.
+   [2:07] End card with a logo and URL.
+   ```
+5. Store this description as a single chromem document with `type = "video"`.
+
+This gives a searchable semantic fingerprint of the video without any audio processing.
+The description is good enough for queries like "find the video where I was at the
+whiteboard" or "show me videos with code on screen".
+
+Accepted extensions: `.mp4`, `.mov`, `.mkv`, `.webm`. Files over **500 MB** are skipped
+by default (configurable via `[index] max_video_mb` in config).
+
+---
 
 ### Background indexing
 
@@ -400,10 +473,20 @@ func searchIndexTool(ix *index.Indexer) *skills.Tool {
 }
 ```
 
-`SKILL.md` instructs the AI when to call `search_index`:
-- When the user asks about a document, codebase, or topic that may be in indexed files
-- When memory.md doesn't have enough context and the answer might be in local files
-- Explicitly when asked to "search", "find in files", "look up", etc.
+`SKILL.md` instructs the AI when to call `search_index` and, just as importantly, when
+**not** to:
+
+**Call `search_index` when:**
+- User explicitly says "search", "find", "look up", "what's in my files about…"
+- User asks about a specific document, note, or file by name or topic
+- User asks about media — "find the photo of X", "which video has Y in it"
+- The question likely has a local-file answer (e.g. meeting notes, personal vault entries)
+
+**Do NOT call `search_index` when:**
+- General coding, writing, or reasoning tasks
+- The answer comes from the AI's own knowledge (factual questions, explanations)
+- The conversation is already mid-flow and context was retrieved earlier in the session
+- The user is asking something clearly unrelated to their indexed files
 
 ---
 
@@ -433,7 +516,7 @@ func searchIndexTool(ix *index.Indexer) *skills.Tool {
 | `go.mod` / `go.sum` | **Modify** | Add `github.com/philippgille/chromem-go` |
 | `index/store.go` | **New** | chromem-go wrapper: Open, Add, Query, Count |
 | `index/embed.go` | **New** | llama-server embedding client + chromem EmbeddingFunc adapter |
-| `index/chunk.go` | **New** | Fixed-size chunker, file classifier |
+| `index/chunk.go` | **New** | Fixed-size chunker, file classifier (text + media) |
 | `index/manifest.go` | **New** | Lightweight mtime manifest for change detection |
 | `index/indexer.go` | **New** | Walk → chunk → embed → store; progress channel |
 | `skills/rag/SKILL.md` | **New** | AI guidance: when/how to call search_index |
@@ -443,6 +526,8 @@ func searchIndexTool(ix *index.Indexer) *skills.Tool {
 | `main.go` | **Modify** | Init index store + indexer; pass to agent |
 | `tui/commands.go` | **Modify** | `/index` command: add, status, clear |
 | `tui/screens/chat.go` | **Modify** | Handle `IndexProgressMsg` / `IndexDoneMsg` → HUD status |
+
+| `index/vision.go` | **New** | Image captioning + video keyframe description via llama-server vision |
 
 **No changes needed to:** `memory/`, `session/`, `runner/`, `config/`, `skills/core/`, `skills/vault/`
 
@@ -466,14 +551,27 @@ itself rather than disappear.
 
 ---
 
-## Phase 10 Preview — Auto-Inject RAG Context
+## Phase 10 — RAG Improvements (Not Auto-Inject)
 
-Once Phase 9 is stable, Phase 10 adds hybrid push/pull:
+Auto-injecting RAG context into every prompt is **not** a goal for Phase 10 or beyond.
+The reasons are covered under the pull-model design decision above. Querying the vector
+DB on every message is expensive, pollutes context, and the AI is a better judge of
+when retrieval is needed than a blanket threshold check.
 
-- Before every `StreamCmd`, embed the user message and query the index for top-k chunks
-- If results exceed a relevance threshold, prepend them to the conversation as a system
-  message: `"Relevant context from local files:\n\n{chunks}"`
-- This happens transparently — the AI doesn't need to call `search_index` manually for
-  everyday queries
-- The pull model (`search_index` tool) remains for explicit targeted retrieval
-- A config flag `[index] auto_inject = true/false` gates this behaviour
+Phase 10 instead focuses on making the pull model smarter and faster:
+
+- **Hybrid BM25 + vector search** — keyword pre-filter before semantic ranking for higher
+  precision on exact-match queries
+- **Re-ranking** — use a small cross-encoder or LLM rerank pass to order results better
+  before returning to the AI
+- **Chunk deduplication** — when multiple overlapping chunks from the same file score
+  highly, merge them into a single coherent passage before injection
+- **Source citation** — `search_index` results include file path + line range so the AI
+  can cite them in responses (`See: notes/2025-Q3.md:42`)
+- **PDF/EPUB ingestion** — via `pdftotext` (poppler) or `go-epub` where available
+- **Wikilink traversal** — follow `[[links]]` in vault Markdown to fetch related notes
+  in a single retrieval hop
+
+The pull model with a well-written `SKILL.md` is the right long-term architecture.
+If a user explicitly wants every message to trigger a search, that belongs as a
+user-toggleable mode (`/index always-search on`), not a system-level default.

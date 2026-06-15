@@ -12,9 +12,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/kez/livie/config"
+	"github.com/kez/livie/index"
 	"github.com/kez/livie/skills"
 	"github.com/kez/livie/skills/core"
 	"github.com/kez/livie/skills/livieself"
+	rag "github.com/kez/livie/skills/rag"
 	vaultskill "github.com/kez/livie/skills/vault"
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -54,7 +56,9 @@ type Agent struct {
 // New creates a new Agent from the given config.
 // It constructs the skill loader, registers built-in and external skills,
 // and builds the initial system prompt from the vault + skill descriptions.
-func New(cfg *config.Config) *Agent {
+//
+// indexer and store are optional (nil = RAG feature disabled).
+func New(cfg *config.Config, indexer *index.Indexer, store *index.Store) *Agent {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "." // fallback — should never fail in practice
@@ -67,6 +71,10 @@ func New(cfg *config.Config) *Agent {
 	// Hard-disabled means the tool is absent from API requests entirely.
 	if cfg.Memory.Enabled {
 		loader.RegisterBuiltin(vaultskill.New(cfg.Paths.Vault))
+	}
+	// RAG skill is registered when the local index is available.
+	if indexer != nil && store != nil {
+		loader.RegisterBuiltin(rag.New(indexer, store))
 	}
 	_ = loader.DiscoverExternal() // non-fatal — missing dir is fine
 

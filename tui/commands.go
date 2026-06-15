@@ -42,6 +42,11 @@ const (
 
 	// Phase 7 addendum:
 	ActionMemoryChanged // handled by ChatModel — rebuilds system prompt after memory config toggle
+
+	// Phase 9 — RAG index actions:
+	ActionIndexAdd    // start background indexing of a path
+	ActionIndexStatus // show index status
+	ActionIndexClear  // wipe the entire index
 )
 
 // SubArg describes a named sub-argument for a /command (e.g. "start" for /run).
@@ -378,7 +383,36 @@ func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manag
 			return fmt.Sprintf("unknown subcommand: %q\n\nUsage: `/memory [status|on|off|profile on|off|memory on|off]`", args[0]), ActionNone
 		},
 	})
-	r.Register(stub("index", "Manage the local media index"))
+	// /index — manage the local document index
+	r.Register(&Command{
+		Name:        "index",
+		Description: "Manage the local document and media index",
+		Subcommands: []SubArg{
+			{Name: "add", Description: "Index a file or directory recursively (runs in background)",
+				SubArgs: []SubArg{{Name: "<path>", Description: "File or directory to index"}}},
+			{Name: "status", Description: "Show file count, chunk count, store size, and index path"},
+			{Name: "clear", Description: "Wipe the entire index and manifest"},
+		},
+		Handler: func(args []string) (string, AppAction) {
+			if len(args) == 0 {
+				return "Usage: `/index [add <path>|status|clear]`", ActionNone
+			}
+			switch strings.ToLower(args[0]) {
+			case "add":
+				if len(args) < 2 {
+					return "Usage: `/index add <path>`", ActionNone
+				}
+				IndexPendingPath = strings.Join(args[1:], " ")
+				return "", ActionIndexAdd
+			case "status":
+				return "", ActionIndexStatus
+			case "clear":
+				return "", ActionIndexClear
+			default:
+				return fmt.Sprintf("unknown subcommand: %q\n\nUsage: `/index [add <path>|status|clear]`", args[0]), ActionNone
+			}
+		},
+	})
 	r.Register(stub("config", "Open the config file in your editor"))
 }
 
@@ -659,3 +693,7 @@ type CommandActionMsg struct {
 
 // Version is set at build time via -ldflags.
 var Version = "dev"
+
+// IndexPendingPath holds the path argument for the most recent /index add command.
+// Access is safe because the TUI processes one message at a time (single-threaded).
+var IndexPendingPath string

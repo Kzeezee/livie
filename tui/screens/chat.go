@@ -14,6 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/kez/livie/agent"
 	"github.com/kez/livie/config"
+	"github.com/kez/livie/index"
 	"github.com/kez/livie/runner"
 	"github.com/kez/livie/session"
 	"github.com/kez/livie/tui"
@@ -198,11 +199,16 @@ var (
 				Bold(true)
 )
 
+// indexStatusClearMsg fires 5 s after indexing completes to revert the HUD status.
+type indexStatusClearMsg struct{}
+
 // ChatModel is the primary screen — welcome block + chat in one viewport.
 type ChatModel struct {
 	cfg      *config.Config
 	runner   *runner.Manager
 	agent    *agent.Agent
+	indexer  *index.Indexer // nil when RAG is unavailable
+	store    *index.Store   // nil when RAG is unavailable
 	keys     tui.KeyMap
 	registry *tui.CommandRegistry
 
@@ -213,6 +219,10 @@ type ChatModel struct {
 	resumePicker components.SessionPickerModel
 	toolConfirm  components.ToolConfirmModel
 	pendingToolID string // ID of the in-flight tool call, "" when none
+
+	// indexProg is the progress channel from a running /index add operation.
+	// nil when no indexing is in progress.
+	indexProg <-chan index.Progress
 
 	width  int
 	height int
@@ -237,7 +247,7 @@ const (
 	divHeight = 2                    // divider above input + divider above HUD
 )
 
-func NewChatModel(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent, width, height int) ChatModel {
+func NewChatModel(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent, ix *index.Indexer, store *index.Store, width, height int) ChatModel {
 	inputModel := components.NewInputModel(width)
 	vpH := viewportH(height, inputModel.Height(), 0)
 
@@ -250,6 +260,8 @@ func NewChatModel(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent, wid
 		cfg:              cfg,
 		runner:           mgr,
 		agent:            agt,
+		indexer:          ix,
+		store:            store,
 		keys:             tui.DefaultKeyMap(),
 		registry:         tui.NewCommandRegistry(cfg, mgr),
 		hud:              components.DefaultHUDState(),
@@ -268,7 +280,9 @@ func NewChatModel(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent, wid
 	m.registry.Register(newCmd(m))
 	m.registry.Register(skillsCmd(agt))
 	m.hud.CWD = shortenHomePath(initCwd)
-	m.hud.SkillCount = agt.SkillCount()
+	if agt != nil {
+		m.hud.SkillCount = agt.SkillCount()
+	}
 	m.syncHUDState()
 	m.showWelcome()
 	return m
@@ -493,6 +507,49 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		}
 		m.messages.AddMessage(components.NewBashOutputMessage(msg.output, msg.exitCode))
 		m.messages.GotoBottom()
+
+	case index.IndexProgressMsg:
+		// Progress update from a running /index add operation.
+		if msg.Done {
+			// Indexing complete — update HUD and show a message.
+			if m.indexer != nil {
+				m.hud.StatusMsg = "index ready"
+				m.hud.StatusOK = true
+			}
+			m.indexProg = nil
+			fileCount, chunkCount := 0, 0
+			if m.indexer != nil {
+				fileCount, chunkCount = m.indexer.ManifestStats()
+			}
+			m.messages.AddMessage(components.NewMessage(
+				components.MsgSystem,
+				fmt.Sprintf("✓ index ready — %d files, %d chunks", fileCount, chunkCount),
+			))
+			m.messages.GotoBottom()
+			cmds = append(cmds, tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+				return indexStatusClearMsg{}
+			}))
+		} else if msg.FilesTotal > 0 {
+			m.hud.StatusMsg = fmt.Sprintf("indexing… (%d/%d)", msg.FilesDone, msg.FilesTotal)
+			m.hud.StatusOK = true
+		}
+		// Re-issue poll so progress keeps flowing.
+		if m.indexProg != nil {
+			cmds = append(cmds, indexPollCmd(m.indexProg))
+		}
+
+	case index.IndexDoneMsg:
+		// Channel closed — indexing is complete.
+		m.indexProg = nil
+		m.hud.StatusMsg = fmt.Sprintf("index ready (%d files)", msg.FileCount)
+		m.hud.StatusOK = true
+		cmds = append(cmds, tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+			return indexStatusClearMsg{}
+		}))
+
+	case indexStatusClearMsg:
+		m.hud.StatusMsg = "Ready"
+		m.hud.StatusOK = true
 
 	case quitConfirmMsg:
 		m.quitFirst = false
@@ -804,9 +861,74 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 		if m.agent != nil {
 			m.agent.SetVaultMemory(m.cfg.Memory.Enabled)
 		}
+
+	case tui.ActionIndexAdd:
+		path := tui.IndexPendingPath
+		if path == "" {
+			m.messages.AddMessage(components.NewMessage(components.MsgSystem, "✗ no path specified"))
+			m.messages.GotoBottom()
+			return nil
+		}
+		if m.indexer == nil {
+			m.messages.AddMessage(components.NewMessage(components.MsgSystem,
+				"✗ index unavailable — local runner required. Start with /run start"))
+			m.messages.GotoBottom()
+			return nil
+		}
+		m.messages.AddMessage(components.NewMessage(components.MsgSystem,
+			fmt.Sprintf("indexing %s… (running in background)", path)))
+		m.messages.GotoBottom()
+		m.hud.StatusMsg = "indexing…"
+		m.hud.StatusOK = true
+		ctx := context.Background()
+		m.indexProg = m.indexer.AddPath(ctx, path)
+		return indexPollCmd(m.indexProg)
+
+	case tui.ActionIndexStatus:
+		if m.indexer == nil {
+			m.messages.AddMessage(components.NewMessage(components.MsgSystem,
+				"✗ index unavailable — local runner required"))
+		} else {
+			m.messages.AddMessage(components.NewMessage(components.MsgAssistant, m.indexer.Status()))
+		}
+		m.messages.GotoBottom()
+
+	case tui.ActionIndexClear:
+		if m.indexer == nil {
+			m.messages.AddMessage(components.NewMessage(components.MsgSystem,
+				"✗ index unavailable — local runner required"))
+			m.messages.GotoBottom()
+			return nil
+		}
+		ctx := context.Background()
+		if err := m.indexer.Clear(ctx); err != nil {
+			m.messages.AddMessage(components.NewMessage(components.MsgError,
+				fmt.Sprintf("✗ clear failed: %v", err)))
+		} else {
+			m.messages.AddMessage(components.NewMessage(components.MsgSystem, "✓ index cleared"))
+		}
+		m.messages.GotoBottom()
 	}
 
 	return nil
+}
+
+// indexPollCmd returns a tea.Cmd that reads one Progress update from ch.
+// If the channel is closed it returns IndexDoneMsg.
+// Blocks up to 500 ms so we don't busy-loop between events.
+func indexPollCmd(ch <-chan index.Progress) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case p, ok := <-ch:
+			if !ok {
+				return index.IndexDoneMsg{}
+			}
+			return index.IndexProgressMsg{Progress: p}
+		case <-time.After(500 * time.Millisecond):
+			// Heartbeat — no real update but keeps the poll loop alive.
+			return index.IndexProgressMsg{}
+		}
+	}
 }
 
 // syncHUDState refreshes all HUD fields: model name, endpoint, token max,
