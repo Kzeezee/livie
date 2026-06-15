@@ -797,6 +797,13 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 		// HUD skill count is refreshed via syncHUDState which is called
 		// every second by hudTickMsg. Trigger it immediately here too.
 		m.syncHUDState()
+
+	case tui.ActionMemoryChanged:
+		// Hard-register or hard-remove write_vault_file based on the updated
+		// config flag, then rebuild the system prompt to reflect the new state.
+		if m.agent != nil {
+			m.agent.SetVaultMemory(m.cfg.Memory.Enabled)
+		}
 	}
 
 	return nil
@@ -865,6 +872,13 @@ func (m *ChatModel) syncHUDState() {
 
 	// ── Working directory ─────────────────────────────────────────────────────
 	m.hud.CWD = shortenHomePath(m.bashCwd)
+
+	// ── Session indicator ────────────────────────────────────────────────────
+	if !m.sessionCreatedAt.IsZero() {
+		m.hud.SessionLabel = m.sessionCreatedAt.Format("15:04")
+	} else {
+		m.hud.SessionLabel = ""
+	}
 }
 
 // saveSession persists the current conversation to disk.

@@ -15,6 +15,7 @@ import (
 	"github.com/kez/livie/skills"
 	"github.com/kez/livie/skills/core"
 	"github.com/kez/livie/skills/livieself"
+	vaultskill "github.com/kez/livie/skills/vault"
 	openai "github.com/sashabaranov/go-openai"
 )
 
@@ -62,6 +63,11 @@ func New(cfg *config.Config) *Agent {
 	loader := skills.NewLoader(cfg.Paths.Skills, cwd)
 	loader.RegisterBuiltin(core.New(cwd))
 	loader.RegisterBuiltin(livieself.New())
+	// Vault memory skill is only registered when memory is enabled.
+	// Hard-disabled means the tool is absent from API requests entirely.
+	if cfg.Memory.Enabled {
+		loader.RegisterBuiltin(vaultskill.New(cfg.Paths.Vault))
+	}
 	_ = loader.DiscoverExternal() // non-fatal — missing dir is fine
 
 	d := NewToolDispatcher()
@@ -193,6 +199,25 @@ func contextLimit(cfg *config.Config) int {
 // Conversation returns the agent's Conversation for external manipulation
 // (Reset on /new, LoadHistory on /resume).
 func (a *Agent) Conversation() *Conversation { return a.conv }
+
+// RebuildSystemPrompt rebuilds the system prompt from current config and skill
+// state and applies it to the active conversation.
+func (a *Agent) RebuildSystemPrompt() {
+	a.conv.UpdateSystemPrompt(buildSystemPrompt(a.cfg, a.loader))
+}
+
+// SetVaultMemory enables or disables vault memory at runtime.
+// When enabled: registers write_vault_file and injects the memory path hint.
+// When disabled: hard-removes write_vault_file from the dispatcher so the tool
+// is absent from all subsequent API requests — not merely unmentioned.
+func (a *Agent) SetVaultMemory(enabled bool) {
+	if enabled {
+		vaultskill.New(a.cfg.Paths.Vault).Register(a.tools)
+	} else {
+		a.tools.Unregister("write_vault_file")
+	}
+	a.RebuildSystemPrompt()
+}
 
 // StreamCmd is the primary entry point. Adds the user message to context,
 // builds the API message list, and returns either a ContextTruncatedMsg

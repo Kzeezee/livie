@@ -8,6 +8,12 @@ import (
 	"path/filepath"
 )
 
+// MemoryConfig controls which vault memory layers are active.
+type MemoryConfig struct {
+	Profile bool `toml:"profile"` // inject user-profile.md into the system prompt
+	Enabled bool `toml:"enabled"` // enable memory.md on-demand hint + write_vault_file tool
+}
+
 // Config holds all Livie configuration. Populated from TOML via config/toml.go.
 type Config struct {
 	Runner    RunnerConfig     `toml:"runner"`
@@ -16,6 +22,7 @@ type Config struct {
 	Behaviour BehaviourConfig  `toml:"behaviour"`
 	HUD       HUDConfig        `toml:"hud"`
 	Paths     PathsConfig      `toml:"paths"`
+	Memory    MemoryConfig     `toml:"memory"`
 
 	// Runtime-only — never written to TOML.
 	IsFirstRun bool   `toml:"-"`
@@ -105,6 +112,10 @@ func DefaultConfig() *Config {
 			ConfirmToolCalls: true,
 		},
 		HUD: HUDConfig{Position: "bottom"},
+		Memory: MemoryConfig{
+			Profile: true,
+			Enabled: true,
+		},
 		Paths: PathsConfig{
 			Vault:  filepath.Join(home, ".local", "share", "livie", "vault"),
 			Skills: filepath.Join(home, ".local", "share", "livie", "skills"),

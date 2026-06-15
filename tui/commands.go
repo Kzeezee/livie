@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kez/livie/config"
+	"github.com/kez/livie/memory"
 	"github.com/kez/livie/runner"
 )
 
@@ -38,6 +39,9 @@ const (
 
 	// Phase 10 additions:
 	ActionSkillsUpdated // handled by ChatModel — refreshes HUD skill count after install
+
+	// Phase 7 addendum:
+	ActionMemoryChanged // handled by ChatModel — rebuilds system prompt after memory config toggle
 )
 
 // SubArg describes a named sub-argument for a /command (e.g. "start" for /run).
@@ -291,7 +295,89 @@ func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manag
 			return "", ActionOpenResume
 		},
 	})
-	r.Register(stub("memory", "View or edit Livie's memory files"))
+	r.Register(&Command{
+		Name:        "memory",
+		Description: "Show vault memory, check status, or toggle memory layers on/off",
+		Subcommands: []SubArg{
+			{Name: "status", Description: "Show enabled/disabled state of profile and memory"},
+			{Name: "on", Description: "Enable both user-profile and memory.md"},
+			{Name: "off", Description: "Disable both user-profile and memory.md"},
+			{Name: "profile", Description: "Toggle user-profile injection", SubArgs: []SubArg{
+				{Name: "on", Description: "Enable user-profile.md in system prompt"},
+				{Name: "off", Description: "Disable user-profile.md from system prompt"},
+			}},
+			{Name: "memory", Description: "Toggle memory.md on-demand hint and write tool", SubArgs: []SubArg{
+				{Name: "on", Description: "Enable memory.md on-demand + write_vault_file tool"},
+				{Name: "off", Description: "Disable memory.md hint and hard-remove write_vault_file tool"},
+			}},
+		},
+		Handler: func(args []string) (string, AppAction) {
+			// /memory — show vault file contents
+			if len(args) == 0 {
+				vault := cfg.Paths.Vault
+				userProfile := memory.LoadFile(vault, "user-profile.md")
+				mem := memory.LoadFile(vault, "memory.md")
+				if userProfile == "" && mem == "" {
+					return "Vault memory is empty — nothing written yet.", ActionNone
+				}
+				var sb strings.Builder
+				if userProfile != "" {
+					sb.WriteString("## User Profile\n\n")
+					sb.WriteString(userProfile)
+				}
+				if userProfile != "" && mem != "" {
+					sb.WriteString("\n\n---\n\n")
+				}
+				if mem != "" {
+					sb.WriteString("## Memory\n\n")
+					sb.WriteString(mem)
+				}
+				return sb.String(), ActionNone
+			}
+
+			sub := strings.ToLower(args[0])
+
+			// /memory status
+			if sub == "status" {
+				profileState := onOff(cfg.Memory.Profile)
+				memState := onOff(cfg.Memory.Enabled)
+				return fmt.Sprintf("profile: %s\nmemory:  %s", profileState, memState), ActionNone
+			}
+
+			// /memory on | off
+			if sub == "on" || sub == "off" {
+				enabled := sub == "on"
+				cfg.Memory.Profile = enabled
+				cfg.Memory.Enabled = enabled
+				_ = config.Save(cfg, cfg.ConfigPath)
+				return fmt.Sprintf("memory %s (profile: %s, memory.md: %s)", sub, onOff(enabled), onOff(enabled)), ActionMemoryChanged
+			}
+
+			// /memory profile on|off
+			if sub == "profile" && len(args) >= 2 {
+				val := strings.ToLower(args[1])
+				if val != "on" && val != "off" {
+					return "usage: /memory profile on|off", ActionNone
+				}
+				cfg.Memory.Profile = val == "on"
+				_ = config.Save(cfg, cfg.ConfigPath)
+				return fmt.Sprintf("user-profile injection: %s", onOff(cfg.Memory.Profile)), ActionMemoryChanged
+			}
+
+			// /memory memory on|off
+			if sub == "memory" && len(args) >= 2 {
+				val := strings.ToLower(args[1])
+				if val != "on" && val != "off" {
+					return "usage: /memory memory on|off", ActionNone
+				}
+				cfg.Memory.Enabled = val == "on"
+				_ = config.Save(cfg, cfg.ConfigPath)
+				return fmt.Sprintf("memory.md + write_vault_file: %s", onOff(cfg.Memory.Enabled)), ActionMemoryChanged
+			}
+
+			return fmt.Sprintf("unknown subcommand: %q\n\nUsage: `/memory [status|on|off|profile on|off|memory on|off]`", args[0]), ActionNone
+		},
+	})
 	r.Register(stub("index", "Manage the local media index"))
 	r.Register(stub("config", "Open the config file in your editor"))
 }
@@ -555,6 +641,14 @@ func endpointNames(cfg *config.Config) string {
 		names[i] = ep.Name
 	}
 	return strings.Join(names, ", ")
+}
+
+// onOff returns "on" or "off" for a boolean — used in /memory status output.
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 // CommandActionMsg carries the result of a dispatched command back to the chat model.

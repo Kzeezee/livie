@@ -26,7 +26,22 @@ func Init(vaultPath string) error {
 	if err := seedFile(vaultPath, "system_prompt.md", defaultSystemPrompt); err != nil {
 		return err
 	}
-	return seedFile(vaultPath, "personality.md", defaultPersonality)
+	if err := seedFile(vaultPath, "personality.md", defaultPersonality); err != nil {
+		return err
+	}
+	// Memory files start empty — seeded as zero-byte files so they exist on disk
+	// but contribute no content to the system prompt until the AI writes to them.
+	if err := seedFile(vaultPath, "memory.md", ""); err != nil {
+		return err
+	}
+	return seedFile(vaultPath, "user-profile.md", "")
+}
+
+// WriteFile writes content to vaultPath/filename, creating or overwriting the file.
+// Unlike seedFile, this always overwrites. Callers are responsible for
+// scoping filenames appropriately.
+func WriteFile(vaultPath, filename, content string) error {
+	return os.WriteFile(filepath.Join(vaultPath, filename), []byte(content), 0o644)
 }
 
 // LoadFile reads filename from vaultPath.

@@ -56,6 +56,9 @@ type HUDState struct {
 	// Runner chip (Phase 4)
 	RunnerStatus RunnerStatus
 	RunnerLabel  string // e.g. "llama-server" | "stopped" | "starting"
+
+	// Session indicator (Phase 8)
+	SessionLabel string // e.g. "14:32" — start time of the active session; "" when no session
 }
 
 // DefaultHUDState returns stub values for Phase 1.
@@ -83,14 +86,27 @@ func DefaultHUDState() HUDState {
 func RenderHUD(state HUDState, width int) string {
 	inner := width - 2 // lipgloss Padding(0,1) consumes 1 col each side
 
-	// ── Row 1: ~/dir  (MODE) ─────────────────────────────────────────────────
+	// ── Row 1: ~/dir  (MODE)  ···  · HH:MM ─────────────────────────────────
 	dir := state.CWD
 	if dir == "" {
 		dir = "~"
 	}
 	dirStr := tui.StyleLabel.Render(truncateDir(dir, 36))
 	modeTag := renderModeBadge(state.Mode)
-	row1Content := dirStr + "  " + modeTag
+	left1 := dirStr + "  " + modeTag
+
+	var right1 string
+	if state.SessionLabel != "" {
+		right1 = tui.StyleMuted.Render("· " + state.SessionLabel)
+	}
+
+	lw1 := lipgloss.Width(left1)
+	rw1 := lipgloss.Width(right1)
+	pad1 := inner - lw1 - rw1
+	if pad1 < 1 {
+		pad1 = 1
+	}
+	row1Content := left1 + strings.Repeat(" ", pad1) + right1
 
 	// ── Row 2: [runner chip]  tokens · skills (left)   (endpoint) model (right) ─
 	chipStr := renderRunnerChip(state)

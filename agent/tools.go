@@ -28,6 +28,11 @@ func (d *ToolDispatcher) Register(t *skills.Tool) {
 	d.tools[t.Name] = t
 }
 
+// Unregister removes a tool by name. No-op if the name is not registered.
+func (d *ToolDispatcher) Unregister(name string) {
+	delete(d.tools, name)
+}
+
 // Definitions returns the []openai.Tool slice for inclusion in API requests.
 // Returns nil (not an empty slice) when no tools are registered, which causes
 // the go-openai library to omit the "tools" field from the request entirely —
