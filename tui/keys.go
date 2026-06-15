@@ -64,12 +64,12 @@ func DefaultKeyMap() KeyMap {
 			key.WithHelp("tab", "accept suggestion"),
 		),
 		AutocompleteUp: key.NewBinding(
-			key.WithKeys("up"),
-			key.WithHelp("↑", "suggestion up"),
+			key.WithKeys("shift+tab"),
+			key.WithHelp("shift+tab", "suggestion up"),
 		),
 		AutocompleteDown: key.NewBinding(
-			key.WithKeys("down"),
-			key.WithHelp("↓", "suggestion down"),
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "cycle suggestions"),
 		),
 		ScrollUp: key.NewBinding(
 			key.WithKeys("pgup"),

@@ -635,7 +635,7 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 		case key.Matches(msg, m.keys.AutocompleteUp):
 			m.resumePicker.MoveUp()
 			return true, nil
-		case key.Matches(msg, m.keys.AutocompleteAccept), key.Matches(msg, m.keys.Submit):
+		case key.Matches(msg, m.keys.Submit):
 			return true, func() tea.Msg {
 				return tui.CommandActionMsg{Action: tui.ActionResumeSession}
 			}
@@ -650,18 +650,13 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 	if m.mode == components.ModeBash {
 		if m.bashAutocomplete.IsVisible() {
 			switch {
-			case key.Matches(msg, m.keys.AutocompleteDown):
+			case key.Matches(msg, m.keys.AutocompleteDown): // Tab: cycle forward
 				m.bashAutocomplete.MoveDown()
 				m.syncInputHeight()
 				return true, nil
 
-			case key.Matches(msg, m.keys.AutocompleteUp):
+			case key.Matches(msg, m.keys.AutocompleteUp): // Shift+Tab: cycle backward
 				m.bashAutocomplete.MoveUp()
-				m.syncInputHeight()
-				return true, nil
-
-			case key.Matches(msg, m.keys.AutocompleteAccept): // Tab: cycle forward
-				m.bashAutocomplete.MoveDown()
 				m.syncInputHeight()
 				return true, nil
 
@@ -674,8 +669,8 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 				return true, nil
 
 			default:
-				// Any other key (typing, backspace…) dismisses the popup and
-				// falls through to normal key handling.
+				// Any other key (typing, backspace, ↑/↓ for history…) dismisses
+				// the popup and falls through to normal key handling.
 				m.bashAutocomplete.Dismiss()
 				m.syncInputHeight()
 			}
@@ -687,43 +682,30 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 	// ── Input history — ↑/↓ when no overlay is active ──────────────────────
 	noOverlay := !m.toolConfirm.IsVisible() &&
 		!m.resumePicker.IsVisible() &&
-		!(m.mode == components.ModeBash && m.bashAutocomplete.IsVisible()) &&
-		!m.autocomplete.IsVisible()
+		!(m.mode == components.ModeBash && m.bashAutocomplete.IsVisible())
 
 	if noOverlay {
 		switch {
 		case key.Matches(msg, m.keys.HistoryPrev) && m.input.CursorOnFirstLine():
+			m.autocomplete.Dismiss()
 			m.historyNavigate(-1)
 			return true, nil
 		case key.Matches(msg, m.keys.HistoryNext) && m.input.CursorOnLastLine():
+			m.autocomplete.Dismiss()
 			m.historyNavigate(+1)
 			return true, nil
 		}
 	}
 
-	// ── Autocomplete navigation — intercepted before anything else ───────────
+	// ── Autocomplete navigation (Tab/Shift+Tab) — intercepted before general keys ──
 	if m.autocomplete.IsVisible() {
 		switch {
-		case key.Matches(msg, m.keys.AutocompleteDown):
-			m.autocomplete.MoveDown()
+		case key.Matches(msg, m.keys.AutocompleteDown): // Tab: accept current + advance
+			m.inlineAcceptAndAdvance(+1)
 			return true, nil
 
-		case key.Matches(msg, m.keys.AutocompleteUp):
-			m.autocomplete.MoveUp()
-			return true, nil
-
-		case key.Matches(msg, m.keys.AutocompleteAccept):
-			if m.autocomplete.InSubMode() {
-				if sub := m.autocomplete.SelectedSub(); sub != nil {
-					// Prepend the already-typed prefix (e.g. "/run ") and append
-					// a trailing space so the next level's subs can appear.
-					m.input.SetValue(m.autocomplete.SubInputPrefix() + sub.Name + " ")
-					m.autocomplete.SetInput(m.input.Value(), m.registry)
-				}
-			} else if sel := m.autocomplete.Selected(); sel != nil {
-				m.input.SetValue("/" + sel.Name + " ")
-				m.autocomplete.SetInput(m.input.Value(), m.registry)
-			}
+		case key.Matches(msg, m.keys.AutocompleteUp): // Shift+Tab: retreat + accept
+			m.inlineAcceptAndAdvance(-1)
 			return true, nil
 
 		case key.Matches(msg, m.keys.Escape):
@@ -804,6 +786,11 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 			m.messages.GotoBottom()
 			return true, tea.SetClipboard(content)
 		}
+		return true, nil
+
+	case m.mode == components.ModeChat && key.Matches(msg, m.keys.AutocompleteDown):
+		// Tab in chat mode with no visible autocomplete popup: consume the key
+		// to prevent the textarea from inserting a literal tab character.
 		return true, nil
 	}
 
@@ -1189,6 +1176,47 @@ func (m *ChatModel) acceptBashCompletion() tea.Cmd {
 		return nil
 	}
 	return m.insertBashCompletion(sel, wordStart)
+}
+
+// inlineAcceptAndAdvance implements bash menu-complete style Tab cycling for
+// the slash-command autocomplete popup.
+//
+// For Tab (delta > 0): accept the currently highlighted item, then advance the
+// selection forward — so the first Tab accepts item 0, the second Tab accepts
+// item 1, and so on.
+//
+// For Shift+Tab (delta < 0): retreat the selection first (so the first
+// Shift+Tab wraps to the last item) then accept — mirroring bash's
+// menu-complete-backward behaviour.
+//
+// After acceptance, SetInput is called so the popup re-filters with the new
+// input value (e.g. switching from command-list to sub-arg mode once a
+// trailing space appears). The advance/retreat then operates in the updated
+// context. If the new context has no further matches the popup closes and
+// subsequent Tab presses are consumed as no-ops by the general switch.
+func (m *ChatModel) inlineAcceptAndAdvance(delta int) {
+	if delta < 0 {
+		// Shift+Tab: retreat first so the first press lands on the last item.
+		m.autocomplete.MoveUp()
+	}
+
+	// Accept the currently highlighted suggestion into the input.
+	if m.autocomplete.InSubMode() {
+		if sub := m.autocomplete.SelectedSub(); sub != nil {
+			m.input.SetValue(m.autocomplete.SubInputPrefix() + sub.Name + " ")
+		}
+	} else if sel := m.autocomplete.Selected(); sel != nil {
+		m.input.SetValue("/" + sel.Name + " ")
+	}
+
+	// Re-filter with the updated input so the popup reflects the new context
+	// (e.g. sub-args after a command name is completed with a trailing space).
+	m.autocomplete.SetInput(m.input.Value(), m.registry)
+
+	if delta > 0 {
+		// Tab: advance after accepting so the next Tab press shows the next item.
+		m.autocomplete.MoveDown()
+	}
 }
 
 // syncInputHeight resizes the messages viewport to account for current input
