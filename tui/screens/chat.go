@@ -292,6 +292,13 @@ func NewChatModel(cfg *config.Config, mgr *runner.Manager, agt *agent.Agent, ix 
 	if agt != nil {
 		m.hud.SkillCount = agt.SkillCount()
 	}
+
+	// Load persisted input history — best-effort; ignore errors.
+	if hist, err := session.LoadInputHistory(); err == nil && len(hist) > 0 {
+		m.inputHistory = hist
+		m.historyIdx = len(hist)
+	}
+
 	m.syncHUDState()
 	m.showWelcome()
 	return m
@@ -806,6 +813,8 @@ func (m *ChatModel) handleSubmit() tea.Cmd {
 	// Record in history, deduplicating consecutive identical entries.
 	if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
 		m.inputHistory = append(m.inputHistory, text)
+		// Persist the updated history — best-effort; ignore errors.
+		_ = session.SaveInputHistory(m.inputHistory)
 	}
 	m.historyIdx = len(m.inputHistory)
 	m.historyDraft = ""
