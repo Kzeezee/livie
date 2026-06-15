@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -237,6 +238,14 @@ type ChatModel struct {
 	// bashCwd is the working directory maintained across bash-mode commands.
 	// Initialised to the process cwd at startup; updated after every command.
 	bashCwd string
+
+	// inputHistory holds previously submitted messages/commands (most recent last).
+	// historyIdx == len(inputHistory) means the user is at the live draft slot.
+	// historyDraft preserves whatever was in the input when ↑ was first pressed,
+	// so it can be restored when ↓ reaches the bottom of the history.
+	inputHistory []string
+	historyIdx   int
+	historyDraft string
 
 	// bashAutocomplete holds shell completion suggestions shown over the input.
 	bashAutocomplete components.BashAutocompleteModel
@@ -511,25 +520,44 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 	case index.IndexProgressMsg:
 		// Progress update from a running /index add operation.
 		if msg.Done {
-			// Indexing complete — update HUD and show a message.
-			if m.indexer != nil {
-				m.hud.StatusMsg = "index ready"
+			m.indexProg = nil
+			var statusText, msgText string
+			switch {
+			case msg.FilesDone == 0 && msg.FilesFailed > 0:
+				// Total failure — nothing made it into the index.
+				statusText = "index: all failed"
+				msgText = fmt.Sprintf(
+					"✗ indexing failed — 0/%d files indexed\n\n"+
+						"Embedding requires the local runner to be running with a model that supports embeddings.\n"+
+						"Try `/run start`, then `/index add` again.",
+					msg.FilesTotal,
+				)
+				m.hud.StatusOK = false
+			case msg.FilesFailed > 0:
+				// Partial failure — some files indexed, some not.
+				statusText = fmt.Sprintf("index: %d/%d", msg.FilesDone, msg.FilesTotal)
+				msgText = fmt.Sprintf(
+					"⚠ indexing finished — %d/%d files indexed, %d failed, %d chunks",
+					msg.FilesDone, msg.FilesTotal, msg.FilesFailed, msg.ChunksStored,
+				)
+				m.hud.StatusOK = true
+			default:
+				// Full success.
+				statusText = fmt.Sprintf("index ready (%d files)", msg.FilesDone)
+				msgText = fmt.Sprintf(
+					"✓ index ready — %d files, %d chunks",
+					msg.FilesDone, msg.ChunksStored,
+				)
 				m.hud.StatusOK = true
 			}
-			m.indexProg = nil
-			fileCount, chunkCount := 0, 0
-			if m.indexer != nil {
-				fileCount, chunkCount = m.indexer.ManifestStats()
-			}
-			m.messages.AddMessage(components.NewMessage(
-				components.MsgSystem,
-				fmt.Sprintf("✓ index ready — %d files, %d chunks", fileCount, chunkCount),
-			))
+			m.hud.StatusMsg = statusText
+			m.messages.AddMessage(components.NewMessage(components.MsgSystem, msgText))
 			m.messages.GotoBottom()
 			cmds = append(cmds, tea.Tick(5*time.Second, func(time.Time) tea.Msg {
 				return indexStatusClearMsg{}
 			}))
 		} else if msg.FilesTotal > 0 {
+			// Ongoing progress — update the HUD status line.
 			m.hud.StatusMsg = fmt.Sprintf("indexing… (%d/%d)", msg.FilesDone, msg.FilesTotal)
 			m.hud.StatusOK = true
 		}
@@ -539,13 +567,9 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		}
 
 	case index.IndexDoneMsg:
-		// Channel closed — indexing is complete.
+		// Channel was closed before a Done progress was received (shouldn't
+		// happen in normal flow, but handle gracefully).
 		m.indexProg = nil
-		m.hud.StatusMsg = fmt.Sprintf("index ready (%d files)", msg.FileCount)
-		m.hud.StatusOK = true
-		cmds = append(cmds, tea.Tick(5*time.Second, func(time.Time) tea.Msg {
-			return indexStatusClearMsg{}
-		}))
 
 	case indexStatusClearMsg:
 		m.hud.StatusMsg = "Ready"
@@ -559,6 +583,14 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 	m.input, inputCmd = m.input.Update(msg)
 	cmds = append(cmds, inputCmd)
 	m.syncInputHeight()
+
+	// If the user typed freely and diverged from the history slot being previewed,
+	// snap back to the live-draft position so the next ↑ starts fresh.
+	if m.historyIdx < len(m.inputHistory) &&
+		m.input.Value() != m.inputHistory[m.historyIdx] {
+		m.historyIdx = len(m.inputHistory)
+		m.historyDraft = ""
+	}
 
 	var c tea.Cmd
 	m.messages, c = m.messages.Update(msg)
@@ -649,6 +681,23 @@ func (m *ChatModel) handleKey(msg tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 			}
 		} else if key.Matches(msg, m.keys.AutocompleteAccept) { // Tab with no popup
 			return true, bashCompleteCmd(m.input.Value(), m.bashCwd)
+		}
+	}
+
+	// ── Input history — ↑/↓ when no overlay is active ──────────────────────
+	noOverlay := !m.toolConfirm.IsVisible() &&
+		!m.resumePicker.IsVisible() &&
+		!(m.mode == components.ModeBash && m.bashAutocomplete.IsVisible()) &&
+		!m.autocomplete.IsVisible()
+
+	if noOverlay {
+		switch {
+		case key.Matches(msg, m.keys.HistoryPrev) && m.input.CursorOnFirstLine():
+			m.historyNavigate(-1)
+			return true, nil
+		case key.Matches(msg, m.keys.HistoryNext) && m.input.CursorOnLastLine():
+			m.historyNavigate(+1)
+			return true, nil
 		}
 	}
 
@@ -766,6 +815,14 @@ func (m *ChatModel) handleSubmit() tea.Cmd {
 	if text == "" {
 		return nil
 	}
+
+	// Record in history, deduplicating consecutive identical entries.
+	if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
+		m.inputHistory = append(m.inputHistory, text)
+	}
+	m.historyIdx = len(m.inputHistory)
+	m.historyDraft = ""
+
 	m.input.Reset()
 
 	// Slash commands work in any mode.
@@ -868,6 +925,13 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 			m.messages.AddMessage(components.NewMessage(components.MsgSystem, "✗ no path specified"))
 			m.messages.GotoBottom()
 			return nil
+		}
+		// Resolve relative paths against the current bash cwd so that
+		// `/index add .` means the directory the user navigated to in bash
+		// mode, not Livie's launch directory.
+		// Tilde paths are left as-is — expandHome in the indexer handles them.
+		if !filepath.IsAbs(path) && !strings.HasPrefix(path, "~") {
+			path = filepath.Join(m.bashCwd, path)
 		}
 		if m.indexer == nil {
 			m.messages.AddMessage(components.NewMessage(components.MsgSystem,
@@ -1231,6 +1295,36 @@ func (m ChatModel) InputHeight() int { return m.input.Height() }
 
 // Input returns a read-only view of the input model for inspection in tests.
 func (m ChatModel) Input() components.InputModel { return m.input }
+
+// historyNavigate moves the history cursor by delta (-1 = older, +1 = newer),
+// loads the appropriate entry into the input box, and preserves the live draft
+// so it can be restored when the user navigates back to the bottom.
+func (m *ChatModel) historyNavigate(delta int) {
+	if len(m.inputHistory) == 0 {
+		return
+	}
+
+	// Capture the live draft the first time the user presses ↑.
+	if m.historyIdx == len(m.inputHistory) && delta < 0 {
+		m.historyDraft = m.input.Value()
+	}
+
+	next := m.historyIdx + delta
+	if next < 0 {
+		next = 0
+	}
+	if next > len(m.inputHistory) {
+		next = len(m.inputHistory)
+	}
+	m.historyIdx = next
+
+	if m.historyIdx == len(m.inputHistory) {
+		m.input.SetValue(m.historyDraft)
+	} else {
+		m.input.SetValue(m.inputHistory[m.historyIdx])
+	}
+	m.syncInputHeight()
+}
 
 // trimError returns a short single-line string from an error for the tool
 // activity status field.

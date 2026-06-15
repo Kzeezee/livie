@@ -187,6 +187,20 @@ func (m *InputModel) IsCommand() bool {
 	return m.cachedIsCmd
 }
 
+// CursorOnFirstLine returns true when the textarea cursor is on the first line.
+func (m InputModel) CursorOnFirstLine() bool {
+	return m.textarea.Line() == 0
+}
+
+// CursorOnLastLine returns true when the textarea cursor is on the last line.
+func (m InputModel) CursorOnLastLine() bool {
+	lines := m.textarea.LineCount()
+	if lines <= 1 {
+		return true
+	}
+	return m.textarea.Line() == lines-1
+}
+
 // Focus gives focus to the input.
 func (m *InputModel) Focus() tea.Cmd {
 	return m.textarea.Focus()

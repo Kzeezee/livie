@@ -446,5 +446,11 @@ func buildArgs(cfg config.RunnerConfig) []string {
 	if !cfg.Verbose {
 		args = append(args, "--log-disable")
 	}
+	// Enable the /v1/embeddings endpoint so the RAG index can embed documents.
+	// --pooling mean is required: the default 'none' returns per-token vectors
+	// which are not OAI-compatible. Mean pooling produces a single sentence
+	// vector and works well for decoder-only models like Gemma.
+	// Neither flag affects chat completions.
+	args = append(args, "--embeddings", "--pooling", "mean")
 	return args
 }

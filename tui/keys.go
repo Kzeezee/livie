@@ -28,6 +28,8 @@ type KeyMap struct {
 	ScrollTop          key.Binding
 	ScrollBot          key.Binding
 	CopyResponse       key.Binding
+	HistoryPrev        key.Binding
+	HistoryNext        key.Binding
 }
 
 // DefaultKeyMap returns the default keybindings.
@@ -88,6 +90,14 @@ func DefaultKeyMap() KeyMap {
 		CopyResponse: key.NewBinding(
 			key.WithKeys("ctrl+y"),
 			key.WithHelp("ctrl+y", "copy last response"),
+		),
+		HistoryPrev: key.NewBinding(
+			key.WithKeys("up"),
+			key.WithHelp("↑", "previous message"),
+		),
+		HistoryNext: key.NewBinding(
+			key.WithKeys("down"),
+			key.WithHelp("↓", "next message"),
 		),
 	}
 }
