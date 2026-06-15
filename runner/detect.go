@@ -11,8 +11,12 @@ import (
 
 // Detect locates a usable llama-server binary. It searches in order:
 //  1. cfg.BinaryPath — if non-empty, exists, and is executable
-//  2. System PATH via exec.LookPath
-//  3. Livie's own managed binary at DataDirBinaryPath()
+//  2. Livie's own managed binary at DataDirBinaryPath()
+//  3. System PATH via exec.LookPath
+//
+// Livie's managed binary is preferred over any system-wide install so that
+// the version downloaded via setup is always used when present, regardless
+// of whatever (potentially older) package-manager binary is on PATH.
 //
 // Returns the resolved path and true, or ("", false) if none is found.
 func Detect(cfg config.RunnerConfig) (path string, found bool) {
@@ -22,13 +26,13 @@ func Detect(cfg config.RunnerConfig) (path string, found bool) {
 		}
 	}
 
-	if p, err := exec.LookPath("llama-server"); err == nil {
-		return p, true
-	}
-
 	managed := DataDirBinaryPath()
 	if isExecutable(managed) {
 		return managed, true
+	}
+
+	if p, err := exec.LookPath("llama-server"); err == nil {
+		return p, true
 	}
 
 	return "", false

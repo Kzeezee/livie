@@ -270,25 +270,39 @@ func (m SetupModel) handleKey(msg tea.KeyPressMsg) (SetupModel, tea.Cmd) {
 				m.installChoice--
 			}
 		case "down", "j":
-			if m.installChoice < 1 {
+			maxChoice := 1
+			if m.llamaInstalled {
+				maxChoice = 2
+			}
+			if m.installChoice < maxChoice {
 				m.installChoice++
 			}
 		case "enter":
 			if m.llamaInstalled {
-				if m.installChoice == 0 {
+				switch m.installChoice {
+				case 0: // Use installed system binary
 					m2 := m.enterModeSelect(0)
 					runner.SaveSetupState(&runner.SetupState{
 						Step: "mode_select", LlamaInstalled: m2.llamaInstalled,
 						DetectedBinPath: m2.detectedBinPath,
 					})
 					return m2, nil
+				case 1: // Download and install a fresh managed copy
+					m2, cmd := m.enterGPUSelect()
+					runner.SaveSetupState(&runner.SetupState{
+						Step: "gpu_select", LlamaInstalled: m2.llamaInstalled,
+						DetectedBinPath: m2.detectedBinPath,
+					})
+					return m2, cmd
+				case 2: // Skip — use a remote endpoint
+					m2 := m.enterModeSelect(1)
+					runner.SaveSetupState(&runner.SetupState{
+						Step: "mode_select", LlamaInstalled: m2.llamaInstalled,
+						Mode: "remote",
+					})
+					return m2, nil
 				}
-				m2, cmd := m.enterGPUSelect() // Wipe & reinstall
-				runner.SaveSetupState(&runner.SetupState{
-					Step: "gpu_select", LlamaInstalled: m2.llamaInstalled,
-					DetectedBinPath: m2.detectedBinPath,
-				})
-				return m2, cmd
+				return m, nil
 			}
 			if m.installChoice == 0 {
 				m2, cmd := m.enterGPUSelect() // Install
@@ -757,14 +771,21 @@ func (m SetupModel) renderInstallPrompt() string {
 	if m.llamaInstalled {
 		check := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentGreen)).Render("✓")
 		heading := check + lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextPrimary)).Bold(true).
-			Render("  llama-server installed")
+			Render("  llama-server found")
 		pathLine := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextSecondary)).
 			Render("\n" + m.detectedBinPath + "\n")
-		choices := []string{"Continue", "Wipe and reinstall"}
+		note := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextMuted)).
+			Render("System-wide binaries may be outdated. You can download\n" +
+				"a fresh copy from the official llama.cpp releases instead.")
+		choices := []string{
+			"Use installed",
+			"Download fresh copy (recommended)",
+			"Skip — configure a remote endpoint instead",
+		}
 		hint := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColTextMuted)).
 			Render("enter to confirm · esc to continue")
 		return lipgloss.JoinVertical(lipgloss.Left,
-			heading, pathLine, renderMenu(choices, m.installChoice), "", hint)
+			heading, pathLine, note, "", renderMenu(choices, m.installChoice), "", hint)
 	}
 
 	cross := lipgloss.NewStyle().Foreground(lipgloss.Color(tui.ColAccentRose)).Render("✗")
