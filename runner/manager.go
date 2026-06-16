@@ -434,6 +434,9 @@ func buildArgs(cfg config.RunnerConfig) []string {
 		"--ctx-size", fmt.Sprintf("%d", cfg.ContextSize),
 		"--host", "127.0.0.1",
 	}
+	if cfg.MMProjPath != "" {
+		args = append(args, "--mmproj", cfg.MMProjPath)
+	}
 	if cfg.GPULayers > 0 {
 		args = append(args, "--n-gpu-layers", fmt.Sprintf("%d", cfg.GPULayers))
 	}

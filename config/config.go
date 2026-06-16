@@ -33,7 +33,8 @@ type Config struct {
 type RunnerConfig struct {
 	BinaryPath  string `toml:"binary_path"`
 	ModelPath   string `toml:"model_path"`
-	GPUBackend  string `toml:"gpu_backend"`  // "cpu" | "cuda" | "metal" | "vulkan"
+	MMProjPath  string `toml:"mmproj_path"` // dedicated multimodal projector (optional)
+	GPUBackend  string `toml:"gpu_backend"` // "cpu" | "cuda" | "metal" | "vulkan"
 	Port        int    `toml:"port"`
 	GPULayers   int    `toml:"gpu_layers"`
 	ContextSize int    `toml:"context_size"`
