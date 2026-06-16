@@ -47,6 +47,7 @@ const (
 	ActionIndexAdd    // start background indexing of a path
 	ActionIndexStatus // show index status
 	ActionIndexClear  // wipe the entire index
+	ActionIndexStop   // cancel any in-progress background indexing
 )
 
 // SubArg describes a named sub-argument for a /command (e.g. "start" for /run).
@@ -391,11 +392,12 @@ func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manag
 			{Name: "add", Description: "Index a file or directory recursively (runs in background)",
 				SubArgs: []SubArg{{Name: "<path>", Description: "File or directory to index"}}},
 			{Name: "status", Description: "Show file count, chunk count, store size, and index path"},
+			{Name: "stop", Description: "Cancel any in-progress background indexing"},
 			{Name: "clear", Description: "Wipe the entire index and manifest"},
 		},
 		Handler: func(args []string) (string, AppAction) {
 			if len(args) == 0 {
-				return "Usage: `/index [add <path>|status|clear]`", ActionNone
+				return "Usage: `/index [add <path>|status|stop|clear]`", ActionNone
 			}
 			switch strings.ToLower(args[0]) {
 			case "add":
@@ -406,10 +408,12 @@ func (r *CommandRegistry) registerBuiltins(cfg *config.Config, mgr *runner.Manag
 				return "", ActionIndexAdd
 			case "status":
 				return "", ActionIndexStatus
+			case "stop":
+				return "", ActionIndexStop
 			case "clear":
 				return "", ActionIndexClear
 			default:
-				return fmt.Sprintf("unknown subcommand: %q\n\nUsage: `/index [add <path>|status|clear]`", args[0]), ActionNone
+				return fmt.Sprintf("unknown subcommand: %q\n\nUsage: `/index [add <path>|status|stop|clear]`", args[0]), ActionNone
 			}
 		},
 	})

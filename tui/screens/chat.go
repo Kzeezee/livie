@@ -223,7 +223,8 @@ type ChatModel struct {
 
 	// indexProg is the progress channel from a running /index add operation.
 	// nil when no indexing is in progress.
-	indexProg <-chan index.Progress
+	indexProg   <-chan index.Progress
+	indexCancel context.CancelFunc // cancels the in-flight indexing context; nil when idle
 
 	width  int
 	height int
@@ -528,6 +529,10 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		// Progress update from a running /index add operation.
 		if msg.Done {
 			m.indexProg = nil
+			if m.indexCancel != nil {
+				m.indexCancel()
+				m.indexCancel = nil
+			}
 			var statusText, msgText string
 			switch {
 			case msg.FilesDone == 0 && msg.FilesFailed > 0:
@@ -577,6 +582,10 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		// Channel was closed before a Done progress was received (shouldn't
 		// happen in normal flow, but handle gracefully).
 		m.indexProg = nil
+		if m.indexCancel != nil {
+			m.indexCancel()
+			m.indexCancel = nil
+		}
 
 	case indexStatusClearMsg:
 		m.hud.StatusMsg = "Ready"
@@ -940,7 +949,8 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 		m.messages.GotoBottom()
 		m.hud.StatusMsg = "indexing…"
 		m.hud.StatusOK = true
-		ctx := context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+		m.indexCancel = cancel
 		m.indexProg = m.indexer.AddPath(ctx, path)
 		return indexPollCmd(m.indexProg)
 
@@ -952,6 +962,25 @@ func (m *ChatModel) handleAction(msg tui.CommandActionMsg) tea.Cmd {
 			m.messages.AddMessage(components.NewMessage(components.MsgAssistant, m.indexer.Status()))
 		}
 		m.messages.GotoBottom()
+
+	case tui.ActionIndexStop:
+		if m.indexCancel == nil {
+			m.messages.AddMessage(components.NewMessage(components.MsgSystem,
+				"no indexing is currently in progress"))
+			m.messages.GotoBottom()
+			return nil
+		}
+		m.indexCancel()
+		m.indexCancel = nil
+		m.indexProg = nil
+		m.hud.StatusMsg = "index stopped"
+		m.hud.StatusOK = false
+		m.messages.AddMessage(components.NewMessage(components.MsgSystem,
+			"✓ indexing cancelled"))
+		m.messages.GotoBottom()
+		return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+			return indexStatusClearMsg{}
+		})
 
 	case tui.ActionIndexClear:
 		if m.indexer == nil {
